@@ -1,0 +1,10 @@
+# Editor/IDE (all directories)
+.idea/
+.vscode/
+
+# PlatformIO build
+.pio/
+
+# PlatformIO Compilation database (IDE-specific, regenerated on build)
+compile_commands.json
+

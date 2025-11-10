@@ -1,0 +1,59 @@
+{
+  "name": "blex",
+  "version": "0.1.0",
+  "description": "A modern compile-time BLE framework for C++20 embedded systems. Enables zero-runtime, declarative BLE design with support for GCC 12.2.0+ (espressif32@6.0.0+).",
+  "keywords": [
+    "ble",
+    "bluetooth",
+    "nimble",
+    "esp32",
+    "cpp20",
+    "metaprogramming"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/srgg/blex"
+  },
+  "authors": [
+    {
+      "name": "Serhii Halkin",
+      "email": "srggal42@gmail.com"
+    }
+  ],
+  "export": {
+    "frameworks": [
+      "arduino",
+      "espidf"
+    ],
+    "platforms": [
+      "espressif32@^6.0.0"
+    ],
+    "dependencies": {
+      "h2zero/NimBLE-Arduino": "^2.3.6"
+    },
+    "build": {
+      "flags": [
+        "-std=gnu++2a",
+        "-fconcepts"
+      ],
+      "unflags": [
+        "-std=c++17"
+      ],
+      "extraScript": [
+        "pre:scripts/version.py",
+        "pre:scripts/cpp-build-flags.py"
+      ]
+    },
+    "extraScript": [
+      "scripts/cpp-build-flags.py",
+      "scripts/version.py",
+      "scripts/dfu-ble-uploader.py"
+    ],
+    "export": {
+      "exclude": [
+        ".github",
+        ".gitignore"
+      ]
+    }
+  }
+}
