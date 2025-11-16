@@ -928,7 +928,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("Connection failed: %s", e)
         return EXIT_CONNECTION_FAILED
     except (KeyboardInterrupt, asyncio.CancelledError):
-        logger.info("Interrupted by user")
+        logger.error("Interrupted by user")
         return EXIT_INTERRUPTED
     except Exception as e:
         logger.exception("Unexpected error during DFU: %s", e)
