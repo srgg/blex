@@ -121,6 +121,7 @@ EXIT_USAGE_ERROR = 2  # argparse uses 2 for command-line usage errors
 EXIT_DEVICE_NOT_FOUND = 3
 EXIT_VERIFICATION_FAILED = 4
 EXIT_CONNECTION_FAILED = 5
+EXIT_CONNECTION_LOST = 6
 EXIT_INTERRUPTED = 130  # Standard exit code for SIGINT (128 + 2)
 
 # -----------------------------
@@ -139,6 +140,10 @@ class ConnectionFailed(DFUError):
 
 
 class VerificationFailed(DFUError):
+    pass
+
+
+class ConnectionLost(DFUError):
     pass
 
 
@@ -456,6 +461,21 @@ class ControlWaiter:
         finally:
             self._prn_future = None
 
+    def on_disconnect(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Called when device disconnects - fail all pending operations (thread-safe)."""
+        def _fail_futures():
+            exc = ConnectionLost("Device disconnected unexpectedly")
+            # Fail all pending command responses
+            for fut in list(self._resp_futures.values()):
+                if not fut.done():
+                    fut.set_exception(exc)
+            self._resp_futures.clear()
+            # Fail pending PRN
+            if self._prn_future and not self._prn_future.done():
+                self._prn_future.set_exception(exc)
+
+        loop.call_soon_threadsafe(_fail_futures)
+
 
 # -----------------------------
 # DFU Uploader
@@ -484,7 +504,6 @@ class DFUUploader:
         self.disconnect_event = asyncio.Event()
         self.console = Console()
         self.detail_lines: list[str] = []
-        self.show_details = False
         self.stdin_fd = None
         self.old_tty_settings = None
         # Interactive mode: progress bar with details toggle (disabled in debug mode or non-TTY)
@@ -591,8 +610,13 @@ class DFUUploader:
             return f"{cleaned[0:8]}-{cleaned[8:12]}-{cleaned[12:16]}-{cleaned[16:20]}-{cleaned[20:32]}"
         return addr
 
-    def _setup_stdin_reader(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Setup non-blocking stdin reader for 'o' key detection in interactive mode."""
+    def _setup_stdin_reader(self, loop: asyncio.AbstractEventLoop, details_expanded_ref: list) -> None:
+        """Setup non-blocking stdin reader for 'o' key detection in interactive mode.
+
+        Args:
+            loop: Event loop to register the reader with
+            details_expanded_ref: Single-element list containing the details_expanded flag
+        """
         import termios
         import tty
 
@@ -600,16 +624,20 @@ class DFUUploader:
             self.stdin_fd = sys.stdin.fileno()
             self.old_tty_settings = termios.tcgetattr(self.stdin_fd)
             tty.setcbreak(self.stdin_fd)
-            loop.add_reader(self.stdin_fd, self._handle_stdin_input)
+            loop.add_reader(self.stdin_fd, lambda: self._handle_stdin_input(details_expanded_ref))
         except Exception as e:
             self.logger.debug("Failed to setup stdin reader: %s", e)
 
-    def _handle_stdin_input(self) -> None:
-        """Handle stdin input - called by asyncio when data is available."""
+    def _handle_stdin_input(self, details_expanded_ref: list) -> None:
+        """Handle stdin input - called by asyncio when data is available.
+
+        Args:
+            details_expanded_ref: Single-element list containing the details_expanded flag
+        """
         try:
             ch = sys.stdin.read(1)
             if ch.lower() == 'o':
-                self.show_details = not self.show_details
+                details_expanded_ref[0] = not details_expanded_ref[0]
         except Exception:
             pass
 
@@ -716,8 +744,9 @@ class DFUUploader:
 
             # Setup stdin reader for interactive mode (only with progress bar)
             loop = asyncio.get_running_loop()
+            details_expanded_ref = [False]  # Mutable reference for stdin handler
             if self.interactive_mode:
-                self._setup_stdin_reader(loop)
+                self._setup_stdin_reader(loop, details_expanded_ref)
 
             try:
                 if self.interactive_mode:
@@ -734,20 +763,22 @@ class DFUUploader:
                         console=self.console,
                     )
                     task = progress.add_task("Uploading", total=total, completed=resume_offset)
-                    upload_complete = False
+                    hint_details_visible_ref = [True]  # Mutable reference for exception handler
 
                     def build_display():
                         """Build display with a progress bar and optional details."""
                         elements = [progress]
-                        if self.show_details and self.detail_lines:
+                        if details_expanded_ref[0] and self.detail_lines:
                             elements.append(Text("\nDetails (press 'o' to hide):"))
                             for line in self.detail_lines:
                                 elements.append(Text(f"  {line}"))
-                        elif not upload_complete:
+                        elif hint_details_visible_ref[0]:
                             elements.append(Text("\nPress 'o' to show details"))
                         return Group(*elements)
 
-                    with Live(build_display(), console=self.console, refresh_per_second=4) as live:
+                    live = Live(build_display(), console=self.console, refresh_per_second=4)
+                    live.start()
+                    try:
                         offset = resume_offset
                         packets = offset // self.chunk_size
                         prn_future = self.waiter.register_prn()
@@ -775,9 +806,16 @@ class DFUUploader:
                                 live.update(build_display())
                                 prn_future = self.waiter.register_prn()
 
-                        # Upload complete - update display one last time without the help text
-                        upload_complete = True
+                        # Upload complete - hide the help text
+                        hint_details_visible_ref[0] = False
                         live.update(build_display())
+                    except (Exception, KeyboardInterrupt):
+                        # Clean up display before exception propagates
+                        hint_details_visible_ref[0] = False
+                        live.update(build_display())
+                        raise
+                    finally:
+                        live.stop()
 
                 else:
                     # Non-interactive mode - just log progress
@@ -832,7 +870,15 @@ class DFUUploader:
 
     # BLE callback
     def _on_disconnect(self, client):
-        self.disconnect_event.set()
+        # Get the event loop (this callback may be called from BLE thread)
+        try:
+            loop = asyncio.get_running_loop()
+            # Thread-safe: schedule disconnect_event.set() and fail pending futures
+            loop.call_soon_threadsafe(self.disconnect_event.set)
+            self.waiter.on_disconnect(loop)
+        except RuntimeError:
+            # No running loop - already shutting down
+            pass
 
 
 # -----------------------------
@@ -927,6 +973,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     except ConnectionFailed as e:
         logger.error("Connection failed: %s", e)
         return EXIT_CONNECTION_FAILED
+    except ConnectionLost as e:
+        logger.error("Connection lost: %s", e)
+        return EXIT_CONNECTION_LOST
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.error("Interrupted by user")
         return EXIT_INTERRUPTED
