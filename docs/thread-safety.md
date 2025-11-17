@@ -76,8 +76,8 @@ FreeRTOSLock: Uses a FreeRTOS recursive mutex for task-context locking. Use this
 ```cpp
 template<typename Tag = void>
 struct LockPolicy {
-    void lock() const;    // Acquire exclusive access
-    void unlock() const;  // Release exclusive access
+    void lock() const noexcept;    // Acquire exclusive access
+    void unlock() const noexcept;  // Release exclusive access
 };
 ```
 The Tag parameter enables per-instance locking, allowing independent static locks and fine-grained concurrency control.

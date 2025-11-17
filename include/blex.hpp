@@ -84,12 +84,20 @@
 #ifndef BLEX_HPP_
 #define BLEX_HPP_
 
+
+#define CONFIG_BT_NIMBLE_ROLE_OBSERVER_DISABLED
+#define CONFIG_BT_NIMBLE_ROLE_CENTRAL_DISABLED
+#define CONFIG_BT_NIMBLE_ROLE_BROADCASTER_DISABLE
+// ReSharper disable once CppUnusedIncludeDirective
+#include <NimBLEDevice.h>
+
 #include "blex/platform.hpp"
 #include "blex/core.hpp"
 #include "blex/nimble.hpp"
 #include "blex/standard.hpp"
 #include "blex/log.h"
 
+// ReSharper disable once CppUnusedIncludeDirective
 #include <services/device_info.hpp>
 #include <services/ota.hpp>
 #include <services/ots.hpp>
@@ -164,29 +172,24 @@ struct blex {
 
     // Re-export Permissions builder
     template<
-        bool read = false,
-        bool write = false,
-        bool writeNoResponse = false,
+        detail::SecPerm read = detail::SecPerm::Disabled,
+        detail::SecPerm write = detail::SecPerm::Disabled,
+        bool writeNoResp = false,
         bool notify = false,
         bool indicate = false,
-        uint8_t readSecurity = 0,
-        uint8_t writeSecurity = 0,
-        uint8_t writeNoRespSecurity = 0,
-        uint8_t notifySecurity = 0,
-        uint8_t indicateSecurity = 0
+        bool broadcast = false
     >
-    using Permissions = ::Permissions<read, write, writeNoResponse, notify, indicate, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
+    using Permissions = ::Permissions<read, write, writeNoResp, notify, indicate, broadcast>;
 
-    // Re-export config templates
+    // Re-export AdvertisementConfig (matches new signature with array reference)
     template<
         int8_t TxPower = 0,
         uint16_t IntervalMin = 100,
         uint16_t IntervalMax = 150,
         auto Appearance = BleAppearance::kUnknown,
-        const uint8_t* ManufacturerData = nullptr,
-        size_t ManufacturerDataLen = 0
+        const auto& ManufacturerData = blex_core::ManufacturerDataBuilder<>::data
     >
-    using AdvertisingConfig = ::AdvertisingConfig<TxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData, ManufacturerDataLen>;
+    using AdvertisementConfig = ::AdvertisementConfig<TxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData>;
 
     template<
         uint16_t MTU = 247,
@@ -296,70 +299,93 @@ struct blex {
     template<auto UUID, typename... Chars>
     struct Service : ServiceBase<UUID, Service<UUID, Chars...>, Chars...> {
         using Backend = ServiceBackend<ServiceBase<UUID, Service<UUID, Chars...>, Chars...>>;
+
+        /**
+         * @brief Start the service (add to server if removed)
+         * @return true if successful, false if service not registered
+         */
+        static bool start() {
+            return Backend::start();
+        }
+
+        /**
+         * @brief Stop the service (remove from server but keep for re-adding)
+         * @return true if successful, false if service not found
+         */
+        static bool stop() {
+            return Backend::stop();
+        }
+
+        /**
+         * @brief Check if the service is currently started
+         * @return true if started, false otherwise
+         */
+        [[nodiscard]]
+        static bool isStarted() {
+            return Backend::isStarted();
+        }
     };
+
+    // ---------------------- Server Implementation (Internal) ----------------------
 
     /**
      * @brief BLE Server (Base + Backend)
      * @details Main BLE server configuration. Inherits compile-time metadata from ServerBase via CRTP,
      * delegates runtime operations to ServerBackend.
      *
-     * @tparam DeviceName Full device name (used in scan response)
-     * @tparam ShortName Short name (used in advertising packet)
+     * @tparam ShortName Short name (used in advertising, and scan response if LongName not provided)
+     * @tparam LongName Long device name (used in scan response) - use nullptr for same as ShortName
      * @tparam Args Variadic list accepting:
-     *              - AdvertisingConfig<...> (optional, max 1)
+     *              - AdvertisementConfig<...> (optional, max 1)
      *              - ConnectionConfig<...> (optional, max 1)
      *              - SecurityConfig<...> (optional, max 1)
      *              - ServerCallbacks<...> (optional, max 1)
      *              - Service types (can be wrapped with PassiveAdvService/ActiveAdvService/BothAdvService)
      *
-     * @par Example:
-     * @code
-     * using MyServer = blex<>::Server<
-     *     &deviceName,
-     *     &shortName,
-     *     AdvertisingConfig<9, 120, 140>,         // TX power, adv intervals (ms)
-     *     ConnectionConfig<247, 15, 15, 0, 4000>, // MTU, intervals (ms), latency, timeout (ms)
-     *     SecurityConfig<>::WithIOCapabilities<DisplayYesNo>::WithMITM<true>,
-     *     ServerCallbacks<>::WithOnConnect<myConnectHandler>,
-     *     PassiveAdvService<MyService1>,           // Services
-     *     ActiveAdvService<MyService2>
-     * >;
-     * @endcode
-     *
-     * @note Base typedef inherited via CRTP from ServerBase
+     * @note Use Server<name> or Server<shortName, longName> or Server<shortName>::WithLongName<longName>
      */
     template<
-        const char* DeviceName,
         const char* ShortName,
+        const char* LongName = nullptr,
         typename... Args
     >
-    struct Server : ServerBase<DeviceName, ShortName, Server<DeviceName, ShortName, Args...>, Args...> {
-        using Backend = ServerBackend<ServerBase<DeviceName, ShortName, Server<DeviceName, ShortName, Args...>, Args...>>;
-        using ConnectionInfoType = typename Backend::ConnectionInfoType;
+    struct Server : ServerBase<ShortName, LongName, Server<ShortName, LongName, Args...>, Args...> {
+        using Base = ServerBase<ShortName, LongName, Server<ShortName, LongName, Args...>, Args...>;
+        using Backend = ServerBackend<Base>;
+        using ConnectionHandle = typename Backend::connection_handle_t;
+        using ConnectionInfo = typename Backend::ConnectionInfoType;
+        static constexpr ConnectionHandle InvalidConnHandle = Backend::InvalidConnHandle;
+
+        // ---------------------- Builder: Long Name ----------------------
+
+        /**
+         * @brief Set a different long device name (scan response)
+         * @tparam NewLongName The full device name
+         */
+        template<const char* NewLongName>
+        using WithLongName = Server<ShortName, NewLongName, Args...>;
 
         // ---------------------- Lifecycle ----------------------
 
         [[nodiscard]]
         static bool init() {
-            if (!Backend::init()) return false;
-
-            // Register all services (uses blex internals, backend-agnostic)
-            BLEX_LOG_DEBUG("[BLEX] init: registering services\n");
-            register_all_services(typename Server::ServicesTuple{});
-            BLEX_LOG_DEBUG("[BLEX] init: starting services\n");
-            start_all_services(typename Server::ServicesTuple{});
-
-            // Configure advertising
-            BLEX_LOG_DEBUG("[BLEX] init: configuring advertising\n");
-            configureAdvertising();
-
-            // Start advertising
-            Backend::startAdvertising();
-            BLEX_LOG_DEBUG("[BLEX] server started (%s)\n", DeviceName);
-            return true;
+            return ensure_configured();
         }
 
         // ---------------------- Advertising Control ----------------------
+
+        static void startAdvertising() {
+            Backend::startAdvertising();
+        }
+
+        static void stopAdvertising() {
+            Backend::stopAdvertising();
+        }
+
+        [[nodiscard]]
+        static bool isAdvertising() {
+            return Backend::isAdvertising();
+        }
 
         [[nodiscard]]
         static bool setTxPower(int8_t dbm) {
@@ -372,11 +398,11 @@ struct blex {
         }
 
         static void updateAdvertising() {
-            BLEX_LOG_DEBUG("📡 Updating advertising configuration...\n");
+            BLEX_LOG_DEBUG("Updating advertising configuration...\n");
             Backend::stopAdvertising();
             configureAdvertising();
             Backend::startAdvertising();
-            BLEX_LOG_DEBUG("✓ Advertising updated and restarted\n");
+            BLEX_LOG_INFO("Advertising updated and restarted\n");
         }
 
         // ---------------------- Connection Management ----------------------
@@ -391,16 +417,124 @@ struct blex {
             return Backend::getConnectedCount();
         }
 
-        static void disconnect(uint16_t conn_handle) {
-            Backend::disconnect(conn_handle);
+        /**
+         * @brief Disconnect peer connection(s)
+         * @param conn_handle Connection handle to disconnect (default: InvalidConnHandle = disconnect all)
+         * @return true if successful, false if server not initialized, handle invalid, or disconnect failed
+         */
+        [[nodiscard]]
+        static bool disconnect(ConnectionHandle conn_handle = InvalidConnHandle) {
+            return Backend::disconnect(conn_handle);
         }
 
+        /**
+         * @brief Get RSSI for a specific connection
+         * @param handle Connection handle (backend-specific type)
+         * @return RSSI in dBm
+         * @note Only available if backend provides getRSSI()
+         */
+        template<typename B = Backend>
         [[nodiscard]]
-        static int8_t getRSSI(uint16_t conn_handle) {
-            return Backend::getRSSI(conn_handle);
+        static auto getRSSI(ConnectionHandle handle) -> decltype(B::getRSSI(handle)) {
+            return Backend::getRSSI(handle);
+        }
+
+        /**
+         * @brief Get device's own BLE address
+         * @return Pointer to address string
+         */
+        [[nodiscard]]
+        static const char* getAddress() {
+            return Backend::getAddress();
+        }
+
+        /**
+         * @brief Get connection info for specific connection
+         * @param handle Connection handle (backend-specific type)
+         * @return Backend-specific connection info object
+         */
+        [[nodiscard]]
+        static ConnectionInfo getConnectionInfo(ConnectionHandle handle) {
+            return Backend::getConnectionInfo(handle);
+        }
+
+        /**
+         * @brief Get all active connections
+         * @return Vector of backend-specific connection info objects
+         * @note Only available if backend provides getConnections()
+         */
+        template<typename B = Backend>
+        [[nodiscard]]
+        static auto getConnections() -> decltype(B::getConnections()) {
+            return Backend::getConnections();
+        }
+
+        // ---------------------- Service Management ----------------------
+
+        /**
+         * @brief Start all registered services (auto-initializes if not already initialized)
+         * @return true if all services started successfully, false otherwise
+         */
+        static bool startAllServices() {
+            BLEX_LOG_DEBUG("Starting all services...\n");
+            // Auto-initialize and configure if needed
+            if (!ensure_configured()) return false;
+
+            // Start all services
+            bool all_success = true;
+            [&]<typename... Services>(ServicesPack<Services...>) {
+                ((blex_core::unwrap_service_impl<Services>::type::start() || (all_success = false, false)), ...);
+            }(typename Server::ServicesTuple{});
+
+            // Start advertising
+            Backend::startAdvertising();
+
+            BLEX_LOG_INFO("All services started successfully\n");
+            return all_success;
+        }
+
+        /**
+         * @brief Stop all running services
+         * @return true if all services stopped successfully, false otherwise
+         */
+        static bool stopAllServices() {
+            bool all_success = true;
+            [&]<typename... Services>(ServicesPack<Services...>) {
+                ((blex_core::unwrap_service_impl<Services>::type::stop() || (all_success = false, false)), ...);
+            }(typename Server::ServicesTuple{});
+            return all_success;
         }
 
     private:
+        // ---------------------- Internal Configuration ----------------------
+
+        struct ConfigTag {};
+        inline static bool configured_ = false;
+
+        [[nodiscard]]
+        static bool ensure_configured() {
+            blex_sync::ScopedLock<LockPolicy, ConfigTag> guard;
+            BLEX_LOG_DEBUG("Configuring services and advertising\n");
+            if (!configured_) {
+                if (!Backend::ensure_initialized()) return false;
+
+                register_all_services(typename Server::ServicesTuple{});
+                configureAdvertising();
+                configured_ = true;
+
+                BLEX_LOG_INFO(
+                    "Configuration complete: Services and advertising are configured and ready to start.\n"
+                    "  Note: Advertising and services are currently stopped:\n"
+                    "    - call startAllServices() to start all services and advertising\n"
+                    "    - call ServiceType::start() to start individual services\n"
+                    "    - call startAdvertising() to start advertising only\n"
+                );
+            } else {
+                BLEX_LOG_TRACE("Services and advertising already configured: nothing to do\n");
+            }
+            return true;
+        }
+
         // ---------------------- Internal Service Registration ----------------------
 
         template<typename... Services>
@@ -437,7 +571,7 @@ struct blex {
             Backend::template configureAdvertising<
                 typename Server::PassiveServices,
                 typename Server::ActiveServices
-            >(DeviceName, ShortName);
+            >();
         }
     };
 };

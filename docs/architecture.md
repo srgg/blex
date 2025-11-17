@@ -9,6 +9,12 @@ BLEX follows a layered architecture with clean separation of concerns, enabling 
 │   Application Layer                     │
 │   (Your BLE server configuration)       │
 ├─────────────────────────────────────────┤
+│   Services Layer (services/*.hpp)       │
+│   - DeviceInfo (0x180A)                 │
+│   - OTA/DFU (0xFE59)                    │
+│   - OTS (0x1825) [stub]                 │
+│   (Optional, user includes)             │
+├─────────────────────────────────────────┤
 │   BLEX API Layer (blex.hpp)             │
 │   - Fluent builders                     │
 │   - Type-safe configuration             │
@@ -36,7 +42,7 @@ BLEX follows a layered architecture with clean separation of concerns, enabling 
 **Purpose**: User-facing BLE server definitions and configurations.
 
 **Responsibilities**:
-- Define BLE server using fluent builder API
+- Define a BLE server using the fluent builder API
 - Implement custom services and characteristics
 - Provide callback implementations
 - Configure advertising, connections, security
@@ -46,7 +52,7 @@ BLEX follows a layered architecture with clean separation of concerns, enabling 
 using MyDevice = MyBlex::Server<
     deviceName,
     deviceNameShort,
-    MyBlex::AdvertisingConfig<>::WithTxPower<9>,
+    MyBlex::AdvertisementConfig<>::WithTxPower<9>,
     MyBlex::ConnectionConfig<>::WithMTU<517>,
     MyBlex::SecurityConfig<>::WithPasskey<123456>,
     MyBlex::ServerCallbacks<>::WithOnConnect<onConnect>,
@@ -58,9 +64,35 @@ using MyDevice = MyBlex::Server<
 
 ---
 
+### Services Layer (`services/`)
+
+**Purpose**: Optional pre-built BLE services for common use cases.
+
+**Responsibilities**:
+- Provide standard Bluetooth SIG services (Device Info, OTS)
+- Implement vendor-specific services (OTA/DFU)
+- Serve as reference implementations for custom services
+
+**Available Services**:
+- **Device Information Service** (`device_info.hpp`): Bluetooth SIG 0x180A
+  - Manufacturer, model, serial number, firmware version, etc
+  - Compile-time constants from a build system
+  - ~100-200 bytes Flash
+
+- **OTA/DFU Service** (`ota.hpp`): Nordic DFU-compatible 0xFE59
+  - Resumable firmware updates with NVS persistence
+  - CRC32 verification, packet receipt notifications
+  - ~2-3KB Flash + `src/ota.cpp` implementation
+
+- **Object Transfer Service** (`ots.hpp`): Bluetooth SIG 0x1825 [stub]
+
+**Key Principle**: Opt-in services are included only if explicitly referenced by the application.
+
+---
+
 ### BLEX API Layer (`blex.hpp`)
 
-**Purpose**: Provide intuitive, type-safe, fluent builder API for BLE configuration.
+**Purpose**: Provide an intuitive, type-safe, fluent builder API for BLE configuration.
 
 **Responsibilities**:
 - Re-export core types with simplified names
@@ -69,7 +101,7 @@ using MyDevice = MyBlex::Server<
 - Generate compile-time configuration structures
 
 **Key Components**:
-- `AdvertisingConfig<>` - Advertising parameters builder
+- `AdvertisementConfig<>` - Advertising parameters builder
 - `ConnectionConfig<>` - Connection parameters builder
 - `SecurityConfig<>` - Security/pairing configuration builder
 - `ServerCallbacks<>` - Server event callbacks builder
@@ -79,7 +111,7 @@ using MyDevice = MyBlex::Server<
 **Example**:
 ```cpp
 // Fluent builder chains compile to constexpr configuration
-AdvertisingConfig<>
+AdvertisementConfig<>
     ::WithTxPower<9>
     ::WithIntervals<100, 200>
     ::WithAppearance<kSensor>
@@ -94,7 +126,7 @@ AdvertisingConfig<>
 **Purpose**: Core template metaprogramming engine and type system.
 
 **Responsibilities**:
-- Define configuration structures (AdvertisingConfig, ConnectionConfig, etc.)
+- Define configuration structures (AdvertisementConfig, ConnectionConfig, etc.)
 - Implement CRTP (Curiously Recurring Template Pattern) for type composition
 - Provide trait-based type introspection
 - Implement compile-time type validation via concepts
@@ -116,7 +148,7 @@ template<
     const uint8_t* ManufacturerData = nullptr,
     size_t ManufacturerDataSize = 0
 >
-struct AdvertisingConfig {
+struct AdvertisementConfig {
     static constexpr uint8_t tx_power = TxPower;
     // ... fluent builders ...
 };
@@ -140,17 +172,19 @@ struct AdvertisingConfig {
 #### Lock Policies
 ```cpp
 // Zero-overhead policy for single-core/pinned execution
+// Note: Actual implementation is templated on Tag type for per-resource locking
+template<typename Tag = void>
 struct NoLock {
     void lock() const noexcept {}
     void unlock() const noexcept {}
 };
 
 // FreeRTOS mutex for multi-core thread safety
+// Note: Actual implementation uses static per-Tag mutex with lazy initialization
+template<typename Tag = void>
 struct FreeRTOSLock {
-    void lock() { xSemaphoreTakeRecursive(mutex, portMAX_DELAY); }
-    void unlock() { xSemaphoreGiveRecursive(mutex); }
-private:
-    SemaphoreHandle_t mutex;
+    void lock() const noexcept { /* acquire recursive mutex */ }
+    void unlock() const noexcept { /* release recursive mutex */ }
 };
 ```
 
@@ -185,7 +219,7 @@ private:
 template<typename Config>
 static bool init() {
     // Extract configuration via template metaprogramming
-    using AdvConfig = typename Config::AdvertisingConfig;
+    using AdvConfig = typename Config::AdvertisementConfig;
     using ConnConfig = typename Config::ConnectionConfig;
     using SecConfig = typename Config::SecurityConfig;
 
@@ -231,16 +265,16 @@ static void registerService() {
 **Implementation**:
 ```cpp
 template</* ... params ... */>
-struct AdvertisingConfig {
+struct AdvertisementConfig {
     template<uint8_t NewTxPower>
-    using WithTxPower = AdvertisingConfig<NewTxPower, Appearance, ...>;
+    using WithTxPower = AdvertisementConfig<NewTxPower, Appearance, ...>;
 
     template<uint16_t NewAppearance>
-    using WithAppearance = AdvertisingConfig<TxPower, NewAppearance, ...>;
+    using WithAppearance = AdvertisementConfig<TxPower, NewAppearance, ...>;
 };
 
 // Usage:
-AdvertisingConfig<>
+AdvertisementConfig<>
     ::WithTxPower<9>
     ::WithAppearance<kSensor>
 ```
@@ -403,10 +437,26 @@ No framework changes needed - services compose naturally with the existing archi
 | Application | User callbacks only | User code only | Full |
 | API | Zero (compile-time) | Zero (templates) | Via Core layer |
 | Core | Zero (compile-time) | Minimal template instantiation | New concepts/traits |
-| Platform | Policy-dependent (0μs - 4μs) | Policy-dependent | New policies |
-| Backend | NimBLE overhead (~40KB) | ~40KB + user services | New backends |
+| Platform | Policy-dependent | Policy-dependent (see below) | New policies |
+| Backend | Runtime BLE operations | ~1-3KB + NimBLE stack (~40KB) | New backends |
 
-**Total BLEX overhead**: ~0-2KB beyond base NimBLE-Arduino stack.
+**Platform Layer Costs:**
+- **NoLock**: ~1 byte RAM per unique Tag (heap allocation for empty class)
+- **FreeRTOSLock**: Platform-dependent (ESP32-S3 @ 240MHz: ~80 bytes RAM per unique Tag, ~0.5-4μs lock/unlock)
+
+**Backend Layer Costs:**
+- **RAM**: ~10-20 bytes per service + ~10-20 bytes per characteristic (pointers, state)
+- **Flash**:
+  - Core BLEX backend: ~500-800 bytes (template instantiation, service registration)
+  - Optional OTA service: ~2-3KB (only if included)
+  - Optional DeviceInfo service: ~100-200 bytes (only if included)
+- **Runtime**: Proportional to NimBLE stack operations (notify, setValue, etc.)
+
+**Total BLEX overhead**:
+- **Minimal config** (core only): ~500-800 bytes Flash, ~50-100 bytes RAM
+- **With built-in services** (OTA + DeviceInfo): ~3-4KB Flash, ~100-400 bytes RAM
+
+**Note**: BLEX is not zero-overhead abstraction - there is minimal RAM cost for runtime state (pointers, locks). However, configuration and type-safety are zero-cost (compile-time only). Built-in services are opt-in.
 
 ---
 

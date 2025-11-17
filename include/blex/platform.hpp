@@ -34,11 +34,11 @@
 
 // ---------------------- Lock Policy Implementations ----------------------
 
-// No-op lock policy - zero overhead for single-core or externally synchronized
+/// @brief No-op lock policy - zero overhead for single-core or externally synchronized
 template<typename /*Tag*/ = void>
 struct NoLock {
-    void lock() const {}
-    void unlock() const {}
+    void lock() const noexcept {}
+    void unlock() const noexcept {}
 };
 
 // ---------------------- Platform Detection ----------------------
@@ -86,20 +86,20 @@ struct NoLock {
         FreeRTOSLock() = default;
         // No destructor - never delete the static global mutex (shutdown ordering issues)
 
-        void lock() const {
+        void lock() const noexcept {
             auto m = get_mutex();
             assert(m != nullptr && "FreeRTOS mutex not initialized");
             xSemaphoreTakeRecursive(m, portMAX_DELAY);
         }
 
-        void unlock() const {
+        void unlock() const noexcept {
             auto m = get_mutex();
             assert(m != nullptr && "FreeRTOS mutex not initialized");
             xSemaphoreGiveRecursive(m);
         }
     private:
         // Per-Tag mutex instance; C++11 function-local statics guarantee thread-safe lazy init
-        static SemaphoreHandle_t& get_mutex() {
+        static SemaphoreHandle_t& get_mutex() noexcept {
             #if defined(ESP_PLATFORM)
                 configASSERT(!xPortInIsrContext() &&
                              "FreeRTOSLock: MUST NOT be called from ISR context!");

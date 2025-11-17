@@ -18,7 +18,7 @@
  * # Binary Protocol (packed structs, little-endian)
  *
  * ## Request Opcodes
- * All requests start with 1-byte opcode:
+ * All requests start with a 1-byte opcode:
  * - **0x01 CREATE_OBJECT**: `[opcode:1][type:1][size:4]` - Initialize OTA with firmware size
  * - **0x02 SET_RECEIPT_NOTIFICATION**: `[opcode:1][prn:2]` - Set progress notification interval (8-128 packets)
  * - **0x03 CALCULATE_CRC**: `[opcode:1]` - Request current offset and CRC32
@@ -48,24 +48,10 @@
 
 #include <vector>
 #include <NimBLEDevice.h>
+#include "services/ota_fwd.hpp"
 #include "blex.hpp"
 
 namespace detail {
-    /// @brief DFU state machine - handles OTA protocol and ESP-IDF integration
-    class DfuProcessor {
-        DfuProcessor() = default;
-        ~DfuProcessor() = default;
-    public:
-        using ResponseWriterFn = void(*)(const uint8_t*, size_t);
-        void handle_command(ResponseWriterFn writer, const uint8_t* data, size_t size);
-        void handle_write_data(ResponseWriterFn writer, const uint8_t* data, size_t size);
-
-        static DfuProcessor* instance();
-
-        DfuProcessor(const DfuProcessor&) = delete;
-        DfuProcessor& operator=(const DfuProcessor&) = delete;
-    };
-
     /// @brief OTA service implementation - characteristic definitions and callbacks
     template<typename Blex>
     class OtaServiceImpl {
@@ -87,20 +73,20 @@ namespace detail {
             DfuProcessor::instance()->handle_write_data(ctrlWriter, data.data(),data.size());
         }
     public:
-        // DFU Ctrl
-        static constexpr char DFU_CTRL_UUID_STR[] = "8ec90001-f315-4f60-9fb8-838830daea50";
+        // DFU Ctrl - UUID moved to ota.cpp to prevent template instantiation
         using CtrlChar = typename Blex::template Characteristic<
             std::vector<uint8_t>,
-            DFU_CTRL_UUID_STR,
-            typename Perms::AllowWrite::AllowNotify,
+            ota_uuids::DFU_CTRL_UUID_STR,
+            typename Perms
+                ::AllowWrite
+                ::AllowNotify,
             typename CharCallbacks::template WithOnWrite<onWriteCtrl>
         >;
 
-        // DFU Data
-        static constexpr char DFU_DATA_UUID_STR[] = "8ec90002-f315-4f60-9fb8-838830daea50";
+        // DFU Data - UUID moved to ota.cpp to prevent template instantiation
         using DataChar = typename Blex::template Characteristic<
             std::vector<uint8_t>,
-            DFU_DATA_UUID_STR,
+            ota_uuids::DFU_DATA_UUID_STR,
             typename Perms::AllowWriteNoResponse,
             typename CharCallbacks::template WithOnWrite<onWriteData>
         >;

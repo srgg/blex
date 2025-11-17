@@ -16,12 +16,12 @@
  *
  * # Thread Safety
  * Synchronized via per-service lock in ota.hpp (OtaServiceImpl).
- * All public OtaManager methods assume caller holds lock.
+ * All public OtaManager methods assume the caller holds the lock.
  *
  * @note Production considerations documented in implementation comments
  */
 
-#include "services/ota.hpp"
+#include "services/ota_fwd.hpp"
 #include "blex/log.h"
 
 #include <Arduino.h>
@@ -32,6 +32,12 @@
 #include "esp_err.h"
 
 #include <Preferences.h>
+
+// OTA Service UUIDs (defined here to prevent template instantiation in ota.cpp)
+namespace ota_uuids {
+    constexpr char DFU_CTRL_UUID_STR[] = "8ec90001-f315-4f60-9fb8-838830daea50";
+    constexpr char DFU_DATA_UUID_STR[] = "8ec90002-f315-4f60-9fb8-838830daea50";
+}
 
 namespace board_specific {
     class OtaManagerImpl;
@@ -44,14 +50,14 @@ namespace board_specific {
  *
  * **CRITICAL: CRC32 provides NO cryptographic security**
  * - CRC32 detects accidental corruption but NOT malicious tampering
- * - An attacker can craft firmware with matching CRC32
+ * - An attacker can craft firmware with a matching CRC32
  * - PRODUCTION REQUIREMENT: Add ECDSA signature verification using mbedtls
  *   before calling esp_ota_set_boot_partition()
  *
  * **Resume Limitations**
  * - esp_ota_begin() erases the partition; true resume requires:
  *   1. Client queries SELECT_OBJECT for offset/CRC before starting
- *   2. Client sends only remaining bytes from offset
+ *   2. Client sends only the remaining bytes from the offset
  *   3. Server skips esp_ota_begin() when resuming (advanced)
  * - Current implementation: NVS persistence + client coordination
  *
@@ -73,6 +79,8 @@ public:
         OTA_READ_FAIL,
         OTA_WRITE_FAIL,
         OTA_END_FAIL,
+        OTA_OUT_OF_SPACE,
+        OTA_OUT_OF_RANGE,
         CRC_MISMATCH,
         SIZE_MISMATCH,
         PERSIST_FAIL,
@@ -125,9 +133,9 @@ namespace board_specific {
 
         static constexpr auto NVS_NAMESPACE = "ota_mgr";
         static constexpr auto NVS_KEY_OFFSET = "offset";
-        static constexpr auto NVS_KEY_SIZE   = "expected_size";
+        static constexpr auto NVS_KEY_SIZE   = "total_size";
 
-        OtaManagerImpl() : otaHandle(0), otaPartition(nullptr) {
+        OtaManagerImpl() : otaOffset(0), otaTotalSize(0), otaPartition(nullptr) {
             prefs.begin(NVS_NAMESPACE, false);
         }
 
@@ -145,36 +153,75 @@ namespace board_specific {
         // begin: prepares OTA partition and starts writing.
         OtaError begin(const uint32_t totalSize) {
             otaPartition = esp_ota_get_next_update_partition(nullptr);
-            if (!otaPartition) return OtaError::NO_PARTITION;
-
-            if (const esp_err_t rc = esp_ota_begin(otaPartition, totalSize, &otaHandle); rc != ESP_OK) {
-                otaHandle = 0;
-                otaPartition = nullptr;
-                return OtaError::OTA_BEGIN_FAIL;
+            if (!otaPartition) {
+                return OtaError::NO_PARTITION;
             }
 
+            otaTotalSize = totalSize;
+            otaOffset = 0;
+
+            // Erase in chunks to prevent BLE connection timeout
+            constexpr size_t ERASE_CHUNK = 64 * 1024;  // 64KB chunks
+            const size_t total_erase = otaPartition->size;
+
+            BLEX_LOG_INFO("[DFU] Erasing partition: %u bytes in %u chunks\n", total_erase, (total_erase + ERASE_CHUNK - 1) / ERASE_CHUNK);
+
+            for (size_t offset = 0; offset < total_erase; offset += ERASE_CHUNK) {
+                const size_t chunk_size = (offset + ERASE_CHUNK > total_erase) ? (total_erase - offset) : ERASE_CHUNK;
+
+                if (const esp_err_t rc = esp_partition_erase_range(otaPartition, offset, chunk_size); rc != ESP_OK) {
+                    BLEX_LOG_ERROR("[DFU] esp_partition_erase_range failed at offset=%u: %d (0x%X)\n", offset, rc, rc);
+                    return OtaError::OTA_BEGIN_FAIL;
+                }
+
+                // Yield to BLE stack every chunk
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+
+            BLEX_LOG_INFO("[DFU] Partition erased successfully\n");
             return OtaError::NONE;
         }
 
         // Persistent progress: store offset, expected size, expected CRC
         bool persistProgress(const OtaManager::PersistableState& memento) {
-          // Preferences return bool for putUInt in Arduino wrapper
-          const bool ok1 = prefs.putUInt(NVS_KEY_OFFSET, memento.written);
-          const bool ok2 = prefs.putUInt(NVS_KEY_SIZE, memento.expectedSize);
-          return ok1 && ok2;
+            if (memento.written != otaOffset || memento.expectedSize != otaTotalSize) {
+                BLEX_LOG_ERROR("State mismatch: written=%u vs expected=%u, expectedSize=%u vs expected=%u\n",
+                    memento.written,
+                    otaOffset,
+                    memento.expectedSize,
+                    otaTotalSize
+                );
+                return false;
+            }
+
+            // Preferences return bool for putUInt in Arduino wrapper
+            const bool ok1 = prefs.putUInt(NVS_KEY_OFFSET, memento.written);
+            const bool ok2 = prefs.putUInt(NVS_KEY_SIZE, memento.expectedSize);
+            return ok1 && ok2;
         }
 
         void loadProgress(OtaManager::PersistableState& memento) {
-            memento.written = prefs.getUInt(NVS_KEY_OFFSET);
-            memento.expectedSize = prefs.getUInt(NVS_KEY_SIZE);
+            otaOffset = memento.written = prefs.getUInt(NVS_KEY_OFFSET);
+            otaTotalSize = memento.expectedSize = prefs.getUInt(NVS_KEY_SIZE);
         }
 
         OtaError write(const uint8_t* data, const size_t len) {
-            if (const esp_err_t rc = esp_ota_write(otaHandle, data, len); rc != ESP_OK) {
+            if (!otaPartition) {
+                return OtaError::NO_PARTITION;
+            }
+
+            // Prevent writing past the OTA partition
+            if (otaOffset + len > otaPartition->size) {
+                return OtaError::OTA_OUT_OF_SPACE;
+            }
+
+            if (const esp_err_t rc = esp_partition_write(otaPartition, otaOffset, data, len); rc != ESP_OK) {
                 // Abort ota handle and mark not in progress
                 abort();
                 return OtaError::OTA_WRITE_FAIL;
             }
+
+            otaOffset += len;
             return OtaError::NONE;
         }
 
@@ -186,6 +233,15 @@ namespace board_specific {
                 return OtaError::NO_PARTITION;
             }
 
+            if (!dst || size == 0) {
+                return OtaError::NONE;
+            }
+
+            // Bounds check – do not read past the partition end
+            if (src_offset + size > otaPartition->size) {
+                return OtaError::OTA_OUT_OF_RANGE;
+            }
+
             if (const esp_err_t rc = esp_partition_read(otaPartition, src_offset, dst, size); rc != ESP_OK) {
               // cannot read; return zero to indicate failure
               return OtaError::OTA_READ_FAIL;
@@ -195,30 +251,27 @@ namespace board_specific {
         }
 
         void abort() {
-            if (otaHandle) {
-                esp_ota_abort(otaHandle);
-                otaHandle = 0;
-            }
-
+            // Forget the OTA partition
             otaPartition = nullptr;
+
+            otaOffset = 0;
+            otaTotalSize = 0;
         }
 
         OtaError commit() {
-            if (!otaPartition || !otaHandle) {
-                BLEX_LOG_ERROR("[DFU] commit: no partition or handle\n");
+            if (!otaPartition ) {
+                BLEX_LOG_ERROR("[DFU] commit: no partition\n");
                 return OtaError::NO_PARTITION;
             }
 
-            esp_err_t rc = esp_ota_end(otaHandle);
-            otaHandle = 0;
-
-            if (rc != ESP_OK) {
-                BLEX_LOG_ERROR("[DFU] esp_ota_end failed: %d (0x%X)\n", rc, rc);
-                otaPartition = nullptr;
-                return OtaError::OTA_END_FAIL;
+            if (otaTotalSize != 0 && otaOffset != otaTotalSize) {
+                BLEX_LOG_ERROR("[DFU] commit: size mismatch, written=%u, expected=%u\n",
+                               otaOffset, otaTotalSize);
+                return OtaError::SIZE_MISMATCH;
             }
 
-            rc = esp_ota_set_boot_partition(otaPartition);
+            // Set the new boot partition
+            esp_err_t rc = esp_ota_set_boot_partition(otaPartition);
             if (rc != ESP_OK) {
                 BLEX_LOG_ERROR("[DFU] esp_ota_set_boot_partition failed: %d (0x%X)\n", rc, rc);
                 otaPartition = nullptr;
@@ -227,6 +280,11 @@ namespace board_specific {
 
             prefs.remove(NVS_KEY_OFFSET);
             prefs.remove(NVS_KEY_SIZE);
+            otaPartition = nullptr;
+
+            // Reset runtime state
+            otaOffset = 0;
+            otaTotalSize = 0;
             otaPartition = nullptr;
 
             return OtaError::NONE;
@@ -247,7 +305,10 @@ namespace board_specific {
             return &impl;
         }
     private:
-        esp_ota_handle_t otaHandle;
+        uint32_t otaOffset;
+        uint32_t otaTotalSize;
+
+
         mutable const esp_partition_t* otaPartition;
         Preferences prefs;
     };
@@ -288,8 +349,6 @@ bool OtaManager::begin(const uint32_t totalSize) {
 
     if ( setError(
         getImpl()->begin(totalSize))!= NONE  ) {
-    // if (const Error error = getImpl()->begin(totalSize); error != NONE) {
-    //     setError(error);
         return false;
     }
 
@@ -448,7 +507,6 @@ void OtaManager::triggerDfu() {
 uint32_t OtaManager::getMaxSize() {
     return getImpl()->getMaxSize();
 }
-
 
 // DFU protocol https://docs.nordicsemi.com/bundle/nrf5_SDK_v17.1.1/page/lib_dfu_transport.html
 // Request handling https://docs.nordicsemi.com/bundle/nrf5_SDK_v17.1.1/page/group_sdk_nrf_dfu_req_handler.html#ga654d8446f2996253016f7c7713124094
@@ -670,7 +728,7 @@ namespace detail {
                 const uint32_t bytes = OtaManager::getOffset();
                 const uint32_t crc = OtaManager::getCrc();
                 writer(reinterpret_cast<const uint8_t*>(&response), responseLength);
-                BLEX_LOG_DONE("[DFU] Firmware update applied: %u bytes, crc=0x%08X. Rebooting device...\n", bytes, crc);
+                BLEX_LOG_INFO("[DFU] Firmware update applied: %u bytes, crc=0x%08X. Rebooting device...\n", bytes, crc);
                 delay(500);
 
                 // Trigger reboot to apply new  firmware
@@ -704,7 +762,21 @@ namespace detail {
         if (response.header.status != DFU_STATUS_SUCCESS) {
             BLEX_LOG_ERROR("[DFU CMD] Command %d execution failed: code %d\n", request->header.opcode, OtaManager::lastError());
         } else {
-            BLEX_LOG_DEBUG("[DFU CMD]   Execution response sent for opcode=0x%02X len=%d\n", request->header.opcode, responseLength);
+#if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
+            // Log a human-readable payload for commands with data
+            if (request->header.opcode == OP_CODE_SELECT_OBJECT && responseLength > sizeof(dfu_response_header_t)) {
+                BLEX_LOG_DEBUG("[DFU CMD]   SELECT response: offset=%u crc=0x%08X max_size=%u\n",
+                    response.data.select_response_data.offset,
+                    response.data.select_response_data.crc32,
+                    response.data.select_response_data.max_size);
+            } else if (request->header.opcode == OP_CODE_CALCULATE_CRC && responseLength > sizeof(dfu_response_header_t)) {
+                BLEX_LOG_DEBUG("[DFU CMD]   CRC response: offset=%u crc=0x%08X\n",
+                    response.data.checksum_data.offset,
+                    response.data.checksum_data.crc32);
+            } else {
+                BLEX_LOG_DEBUG("[DFU CMD]   Execution response sent for opcode=0x%02X len=%d\n", request->header.opcode, responseLength);
+            }
+#endif
         }
     }
 

@@ -467,7 +467,7 @@ struct AggregateFormatDescriptorBase : DescriptorBase<
     static constexpr size_t num_descriptors = sizeof...(PresentationFormatDescriptors);
 
     static_assert(num_descriptors > 0, "AggregateFormat requires at least one PresentationFormat descriptor");
-    static_assert((... && blex_core::has_presentation_format_marker<PresentationFormatDescriptors>()),
+    static_assert((... && blex_core::IsPresentationFormatDescriptor<PresentationFormatDescriptors>),
                   "AggregateFormat only accepts PresentationFormatDescriptor types");
 };
 

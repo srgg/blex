@@ -97,20 +97,64 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
      */
     template<template<typename> class LockPolicy>
     static void register_service(NimBLEServer* server) {
+        #if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
+        BLEX_LOG_TRACE("Registering service %s\n", blex_nimble::make_uuid<UUID>().toString().c_str());
+        #endif
+
         // Create NimBLE service
         pService = server->createService(blex_nimble::make_uuid<UUID>());
 
         // Register all characteristics inline (blex<> will be complete when this is instantiated)
         register_all_chars<LockPolicy>(typename Base::chars_pack{});
+
+        #if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
+        BLEX_LOG_DEBUG("Registered service %s\n", blex_nimble::make_uuid<UUID>().toString().c_str());
+        #endif
     }
 
     /**
-     * @brief Start the service (make it active)
+     * @brief Start the service (makes it visible in GATT table)
+     * @return true if successful, false if service not registered
      */
-    static void start() {
-        if (pService) {
+    static bool start() {
+        if (!pService) {
+            BLEX_LOG_ERROR("Service not registered (pService is null)\n");
+            return false;
+        }
+
+        if (!pService->isStarted()) {
             pService->start();
         }
+        return true;
+    }
+
+    /**
+     * @brief Stop the service (remove from server but keep object for re-adding)
+     * @return true if successful, false if service not found
+     */
+    static bool stop() {
+        if (!pService) {
+            BLEX_LOG_ERROR("Service not registered (pService is null)\n");
+            return false;
+        }
+        NimBLEServer* server = pService->getServer();
+        if (!server) {
+            BLEX_LOG_ERROR("Server not initialized for service\n");
+            return false;
+        }
+
+        // Remove service but keep object (deleteSvc=false) so it can be re-added later
+        server->removeService(pService, false);
+        return true;
+    }
+
+    /**
+     * @brief Check if service is currently started
+     * @return true if started, false otherwise
+     */
+    [[nodiscard]]
+    static bool isStarted() {
+        return pService ? pService->isStarted() : false;
     }
 
 private:
@@ -119,8 +163,23 @@ private:
      */
     template<template<typename> class LockPolicy, typename... CharTypes>
     static void register_all_chars(blex_core::CharsPack<CharTypes...>) {
-        // Call CharacteristicBackend for each characteristic (use Characteristic's Backend typedef)
+        // Register each characteristic and log the actual NimBLE configuration
+        #if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
+        ([]{
+            using CharPermsType = typename CharTypes::Base::perms_type;
+            BLEX_LOG_TRACE("  Registering char %s (security: read=%d, write=%d)\n",
+                blex_nimble::make_uuid<CharTypes::Base::uuid>().toString().c_str(),
+                CharPermsType::read_security,
+                CharPermsType::write_security);
+            auto* pChar = CharTypes::Backend::template register_characteristic<LockPolicy>(pService);
+            BLEX_LOG_DEBUG("  Registered char UUID=%s props=0x%04X descs=%zu\n",
+                pChar->getUUID().toString().c_str(),
+                pChar->getProperties(),
+                std::tuple_size_v<typename CharTypes::Base::descriptors_pack>);
+        }(), ...);
+        #else
         (CharTypes::Backend::template register_characteristic<LockPolicy>(pService), ...);
+        #endif
     }
 };
 
@@ -358,44 +417,66 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
         uint16_t properties = 0;
 
         // Read permissions
+        // NimBLE requires BOTH the base flag (for property advertisement) AND the security flag (for enforcement)
         if constexpr (PermsType::canRead) {
-            if constexpr (PermsType::requireAuthorization) {
-                properties |= NIMBLE_PROPERTY::READ_AUTHOR;
-            } else if constexpr (PermsType::requireAuthentication) {
+            properties |= NIMBLE_PROPERTY::READ;  // Always set a base flag for property advertisement
+
+            if constexpr (PermsType::read_security >= 4) {
+                properties |= NIMBLE_PROPERTY::READ_AUTHOR ;
+                BLEX_LOG_DEBUG("    char: READ | READ_AUTHOR\n");
+            } else if constexpr (PermsType::read_security >= 3) {
                 properties |= NIMBLE_PROPERTY::READ_AUTHEN;
-            } else if constexpr (PermsType::requireEncryption) {
+                BLEX_LOG_DEBUG("    char: READ | READ_AUTHEN\n");
+            } else if constexpr (PermsType::read_security >= 2) {
                 properties |= NIMBLE_PROPERTY::READ_ENC;
+                BLEX_LOG_DEBUG("    char: READ | READ_ENC\n");
             } else {
-                properties |= NIMBLE_PROPERTY::READ;
+                BLEX_LOG_DEBUG("    char: READ\n");
             }
         }
 
         // Write permissions
+        // NimBLE requires BOTH the base flag (for property advertisement) AND the security flag (for enforcement)
         if constexpr (PermsType::canWrite) {
-            if constexpr (PermsType::requireAuthorization) {
-                properties |= NIMBLE_PROPERTY::WRITE_AUTHOR;
-            } else if constexpr (PermsType::requireAuthentication) {
+            properties |= NIMBLE_PROPERTY::WRITE;  // Always set a base flag for property advertisement
+
+            // Mapping for macOS / BLE spec
+            if constexpr (PermsType::write_security >= 4) {
+                properties |= NIMBLE_PROPERTY::WRITE_AUTHOR;;
+                BLEX_LOG_DEBUG("    char: WRITE | WRITE_AUTHOR\n");
+            } else if constexpr (PermsType::write_security >= 3) {
                 properties |= NIMBLE_PROPERTY::WRITE_AUTHEN;
-            } else if constexpr (PermsType::requireEncryption) {
+                BLEX_LOG_DEBUG("    char: WRITE | WRITE_AUTHEN\n");
+            } else if constexpr (PermsType::write_security >= 2) {
                 properties |= NIMBLE_PROPERTY::WRITE_ENC;
+                BLEX_LOG_DEBUG("    char: WRITE | WRITE_ENC\n");
             } else {
-                properties |= NIMBLE_PROPERTY::WRITE;
+                BLEX_LOG_DEBUG("    char: WRITE\n");
             }
         }
 
         // Write-no-response permissions
         if constexpr (PermsType::canWriteNoResponse) {
             properties |= NIMBLE_PROPERTY::WRITE_NR;
+            BLEX_LOG_DEBUG("    char: WRITE_NR\n");
         }
 
         // Notify permission
         if constexpr (PermsType::canNotify) {
             properties |= NIMBLE_PROPERTY::NOTIFY;
+            BLEX_LOG_DEBUG("    char: NOTIFY\n");
         }
 
         // Indicate permission
         if constexpr (PermsType::canIndicate) {
             properties |= NIMBLE_PROPERTY::INDICATE;
+            BLEX_LOG_DEBUG("    char: INDICATE\n");
+        }
+
+        // Broadcast permission
+        if constexpr (PermsType::canBroadcast) {
+            properties |= NIMBLE_PROPERTY::BROADCAST;
+            BLEX_LOG_DEBUG("    char: BROADCAST\n");
         }
 
         // Create NimBLE characteristic
@@ -404,13 +485,14 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             properties
         );
 
-        // Set value for const characteristics
-        if constexpr (Base::is_const_characteristic) {
+        /// Set value for const characteristics
+        if constexpr (Derived::is_const_characteristic) {
             if constexpr (std::is_same_v<typename Base::value_type, std::string> ||
-                          std::is_same_v<typename Base::value_type, const char*>)
-                pC->setValue(Base::value);
-            else
-                pC->setValue(reinterpret_cast<const uint8_t*>(&Base::value), sizeof(typename Base::value_type));
+                          std::is_same_v<typename Base::value_type, const char*>) {
+                pC->setValue(std::string(Derived::value));
+            } else {
+                pC->setValue(reinterpret_cast<const uint8_t*>(&Derived::value), sizeof(typename Base::value_type));
+            }
         }
 
         // Register all descriptors inline (fold expression)
@@ -508,12 +590,14 @@ struct DescriptorBackend<AggregateFormatDescriptorBase<PresentationFormatDescrip
  * @details Provides runtime NimBLE server operations: initialization, advertising, connections
  * Inherits compile-time config from ServerBase.
  */
-template<const char* DeviceName, const char* ShortName, typename Derived, typename... Args>
-struct ServerBackend<ServerBase<DeviceName, ShortName, Derived, Args...>> {
-    using Config = ServerBase<DeviceName, ShortName, Derived, Args...>;
+template<const char* ShortName, const char* LongName, typename Derived, typename... Args>
+struct ServerBackend<ServerBase<ShortName, LongName, Derived, Args...>> {
+    using Config = ServerBase<ShortName, LongName, Derived, Args...>;
+    using connection_handle_t = uint16_t;
     using ConnectionInfoType = NimBLEConnInfo;
 
-    // Sentinel values for optional configuration
+    // Sentinel values for connection handles and optional configuration
+    static constexpr connection_handle_t InvalidConnHandle = 0xFFFF;  // BLE_HS_CONN_HANDLE_NONE
     static constexpr int8_t TX_POWER_UNSET = -127;
     static constexpr uint16_t APPEARANCE_UNSET = 0x0000;
     static constexpr uint8_t DEFAULT_BLE_FLAGS = 0x06;  // LE General Discoverable + BR/EDR Not Supported
@@ -537,7 +621,7 @@ struct ServerBackend<ServerBase<DeviceName, ShortName, Derived, Args...>> {
             if constexpr (is_handler_provided<Config::ConnectHandler>) {
                 Config::ConnectHandler(nimble_conn);
             } else {
-                BLEX_LOG_INFO("🔗 Connected: %s\n", nimble_conn.getAddress().toString().c_str());
+                BLEX_LOG_INFO("Connected: %s\n", nimble_conn.getAddress().toString().c_str());
             }
         }
 
@@ -547,7 +631,7 @@ struct ServerBackend<ServerBase<DeviceName, ShortName, Derived, Args...>> {
             } else {
                 BLEX_LOG_INFO("Disconnected (reason=%d)\n", reason);
                 NimBLEDevice::startAdvertising();
-                BLEX_LOG_INFO("📡 Advertising restarted\n");
+                BLEX_LOG_INFO("Advertising restarted\n");
             }
         }
 
@@ -555,99 +639,131 @@ struct ServerBackend<ServerBase<DeviceName, ShortName, Derived, Args...>> {
             if constexpr (is_handler_provided<Config::MTUChangeHandler>) {
                 Config::MTUChangeHandler(nimble_conn);
             } else {
-                BLEX_LOG_DEBUG("📏 MTU updated: %u bytes for %s\n", MTU, nimble_conn.getAddress().toString().c_str());
+                BLEX_LOG_INFO("MTU updated: %u bytes for %s\n", MTU, nimble_conn.getAddress().toString().c_str());
 
-                server->updateConnParams(
-                    nimble_conn.getConnHandle(),
-                    Config::ConnConfig::conn_interval_min,
-                    Config::ConnConfig::conn_interval_max,
-                    Config::ConnConfig::conn_latency,
-                    Config::ConnConfig::supervision_timeout
-                );
-                BLEX_LOG_DEBUG("📊 Requested connection parameters: interval=%u-%ums, latency=%u, timeout=%ums (%.1fs)\n",
-                            Config::ConnConfig::conn_interval_min_ms, Config::ConnConfig::conn_interval_max_ms,
-                            Config::ConnConfig::conn_latency,
-                            Config::ConnConfig::supervision_timeout_ms, Config::ConnConfig::supervision_timeout_ms / 1000.0f);
+                // Update connection parameters if ConnectionConfig is provided
+                if constexpr (!std::is_void_v<typename Config::ConnConfig>) {
+                    server->updateConnParams(
+                        nimble_conn.getConnHandle(),
+                        Config::ConnConfig::conn_interval_min,
+                        Config::ConnConfig::conn_interval_max,
+                        Config::ConnConfig::conn_latency,
+                        Config::ConnConfig::supervision_timeout
+                    );
+                    BLEX_LOG_INFO("Requested connection parameters: interval=%u-%ums, latency=%u, timeout=%ums (%.1fs)\n",
+                                Config::ConnConfig::conn_interval_min_ms, Config::ConnConfig::conn_interval_max_ms,
+                                Config::ConnConfig::conn_latency,
+                                Config::ConnConfig::supervision_timeout_ms, Config::ConnConfig::supervision_timeout_ms / 1000.0f);
+                }
             }
         }
     };
 
     // ---------------------- Initialization ----------------------
 
+    /**
+     * @brief Ensure server is initialized (auto-initializes if needed)
+     * @return true if initialized (or successfully auto-initialized), false otherwise
+     */
+    [[nodiscard]]
+    static bool ensure_initialized() {
+        if (!server) {
+            return init();
+        }
+        return true;
+    }
+
     [[nodiscard]]
     static bool init() {
+        BLEX_LOG_DEBUG("init: initializing NimBLE-Arduino backend...\n");
+
         static std::atomic_flag init_called = ATOMIC_FLAG_INIT;
         if (init_called.test_and_set(std::memory_order_acq_rel)) {
-            BLEX_LOG_WARN("[BLEX] init: already initialized, returning\n");
+            BLEX_LOG_WARN("NimBLE-Arduino backend already initialized, nothing to do\n");
             return server != nullptr;
         }
 
-        BLEX_LOG_DEBUG("🟢 Initializing BLE server...\n");
-        BLEX_LOG_DEBUG("[BLEX] init: calling NimBLEDevice::init\n");
-        NimBLEDevice::init(DeviceName);
+        BLEX_LOG_TRACE("init: calling NimBLEDevice::init\n");
+        NimBLEDevice::init(Config::device_name);
 
         // Set BLE appearance in GAP service (if AdvConfig provided)
         if constexpr (!std::is_void_v<typename Config::AdvConfig>) {
             if constexpr (Config::AdvConfig::default_appearance != APPEARANCE_UNSET) {
-                BLEX_LOG_DEBUG("[BLEX] init: setting GAP appearance to 0x%04X\n", Config::AdvConfig::default_appearance);
+                BLEX_LOG_TRACE("init: setting GAP appearance to 0x%04X\n", Config::AdvConfig::default_appearance);
                 ble_svc_gap_device_appearance_set(Config::AdvConfig::default_appearance);
             }
         }
 
-        // Only set MTU if not using sentinel value
-        if (Config::ConnConfig::mtu != 0) {
-            BLEX_LOG_DEBUG("[BLEX] init: calling setMTU(%u)\n", Config::ConnConfig::mtu);
-            NimBLEDevice::setMTU(Config::ConnConfig::mtu);
+        // Configure connection parameters if provided
+        if constexpr (!std::is_void_v<typename Config::ConnConfig>) {
+            // Only set MTU if specified
+            if constexpr (Config::ConnConfig::mtu != 0) {
+                BLEX_LOG_TRACE("init: calling setMTU\n");
+                NimBLEDevice::setMTU(Config::ConnConfig::mtu);
+                BLEX_LOG_DEBUG("init: MTU is set to %u\n", Config::ConnConfig::mtu);
+            }
         }
 
-        // Configure BLE security
-        using SecConfig = typename Config::SecurityConfig;
-        BLEX_LOG_DEBUG("[BLEX] init: configuring security (IO=%u, MITM=%d, Bonding=%d, SC=%d, Passkey=%u)\n",
-                    SecConfig::io_capabilities, SecConfig::mitm_protection,
-                    SecConfig::bonding, SecConfig::secure_connections, SecConfig::passkey);
+        // Configure BLE security if user provided SecurityConfig
+        if constexpr (!std::is_void_v<typename Config::SecurityConfig>) {
+            BLEX_LOG_TRACE("init: configuring security...\n");
 
-        // Set IO capabilities
-        NimBLEDevice::setSecurityIOCap(SecConfig::io_capabilities);
+            // Set IO capabilities
+            NimBLEDevice::setSecurityIOCap(Config::SecurityConfig::io_capabilities);
 
-        // Set security authorization mode
-        uint8_t auth_req = 0;
-        if (SecConfig::bonding) auth_req |= BLE_SM_PAIR_AUTHREQ_BOND;
-        if (SecConfig::mitm_protection) auth_req |= BLE_SM_PAIR_AUTHREQ_MITM;
-        if (SecConfig::secure_connections) auth_req |= BLE_SM_PAIR_AUTHREQ_SC;
-        NimBLEDevice::setSecurityAuth(auth_req);
+            // Set security authorization mode
+            uint8_t auth_req = 0;
+            if (Config::SecurityConfig::bonding) auth_req |= BLE_SM_PAIR_AUTHREQ_BOND;
+            if (Config::SecurityConfig::mitm_protection) auth_req |= BLE_SM_PAIR_AUTHREQ_MITM;
+            if (Config::SecurityConfig::secure_connections) auth_req |= BLE_SM_PAIR_AUTHREQ_SC;
+            NimBLEDevice::setSecurityAuth(auth_req);
 
-        // Set static passkey if configured
-        if constexpr (SecConfig::passkey != 0) {
-            BLEX_LOG_DEBUG("[BLEX] init: setting static passkey\n");
-            NimBLEDevice::setSecurityPasskey(SecConfig::passkey);
+            // Set a static passkey if configured
+            if constexpr (Config::SecurityConfig::passkey != 0) {
+                BLEX_LOG_TRACE("init: setting static passkey\n");
+                NimBLEDevice::setSecurityPasskey(Config::SecurityConfig::passkey);
+            }
+            BLEX_LOG_DEBUG("init: security configured: IO=%u, MITM=%d, Bonding=%d, SC=%d, Passkey=%u)\n",
+                Config::SecurityConfig::io_capabilities, Config::SecurityConfig::mitm_protection,
+                Config::SecurityConfig::bonding, Config::SecurityConfig::secure_connections, Config::SecurityConfig::passkey);
+
         }
 
-        BLEX_LOG_DEBUG("[BLEX] init: creating server\n");
+        BLEX_LOG_TRACE("init: creating server\n");
         server = NimBLEDevice::createServer();
         if (!server) {
-            BLEX_LOG_ERROR("Failed to create BLE server\n");
+            BLEX_LOG_ERROR("init: NimBLE-Arduino backend failed to create BLE server\n");
             return false;
         }
 
-        BLEX_LOG_DEBUG("[BLEX] init: setting callbacks\n");
+        BLEX_LOG_TRACE("init: setting callbacks\n");
         static Callbacks callbacks;
         server->setCallbacks(&callbacks);
 
-        BLEX_LOG_DEBUG("[BLEX] init: getting advertising\n");
+        BLEX_LOG_TRACE("init: getting advertising\n");
         adv = NimBLEDevice::getAdvertising();
 
+        BLEX_LOG_INFO("init: NimBLE-Arduino backend successfully initialized\n");
         return true;
     }
 
     // ---------------------- Advertising Control ----------------------
 
     static void startAdvertising() {
-        BLEX_LOG_DEBUG("[BLEX] init: starting advertising\n");
+        BLEX_LOG_DEBUG("Staring advertisement...\n");
         NimBLEDevice::startAdvertising();
+        BLEX_LOG_INFO("Advertising started\n");
     }
 
     static void stopAdvertising() {
+        BLEX_LOG_DEBUG("Stopping advertisement...\n");
         NimBLEDevice::stopAdvertising();
+        BLEX_LOG_INFO("Advertising stopped\n");
+    }
+
+    [[nodiscard]]
+    static bool isAdvertising() {
+        return adv ? adv->isAdvertising() : false;
     }
 
     // ---------------------- Connection Management ----------------------
@@ -662,15 +778,102 @@ struct ServerBackend<ServerBase<DeviceName, ShortName, Derived, Args...>> {
         return server ? server->getConnectedCount() : 0;
     }
 
-    static void disconnect(uint16_t conn_handle) {
-        server->disconnect(conn_handle);
+    /**
+     * @brief Disconnect peer connection(s)
+     * @param conn_handle Connection handle to disconnect (default: InvalidConnHandle = disconnect all)
+     * @return true if successful, false if server not initialized, handle invalid, or disconnect failed
+     */
+    [[nodiscard]]
+    static bool disconnect(connection_handle_t conn_handle = InvalidConnHandle) {
+        if (!server) return false;
+
+        if (conn_handle == InvalidConnHandle) {
+            // Disconnect all peers - cache connection list
+            std::vector<ConnectionInfoType> connections = getConnections();
+            bool all_success = true;
+            for (const ConnectionInfoType& conn : connections) {
+                int rc = server->disconnect(conn.getConnHandle());
+                if (rc != 0) {
+                    BLEX_LOG_ERROR("Failed to disconnect handle %u: error %d\n", conn.getConnHandle(), rc);
+                    all_success = false;
+                }
+            }
+            return all_success;
+        } else {
+            // Disconnect specific peer - validate handle exists first
+            std::vector<ConnectionInfoType> connections = getConnections();
+            bool found = false;
+            for (const ConnectionInfoType& conn : connections) {
+                if (conn.getConnHandle() == conn_handle) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                BLEX_LOG_ERROR("Invalid connection handle: %u\n", conn_handle);
+                return false;
+            }
+
+            int rc = server->disconnect(conn_handle);
+            if (rc != 0) {
+                BLEX_LOG_ERROR("Failed to disconnect handle %u: error %d\n", conn_handle, rc);
+                return false;
+            }
+
+            return true;
+        }
     }
 
+    /**
+     * @brief Get RSSI for a specific connection
+     * @param conn_handle Connection handle
+     * @return RSSI in dBm (0 if server not initialized)
+     */
     [[nodiscard]]
     static int8_t getRSSI(uint16_t conn_handle) {
         if (!server) return 0;
-        auto* conn_info = server->getPeerInfo(conn_handle);
-        return conn_info ? conn_info->getRSSI() : 0;
+        int8_t rssi = 0;
+        ble_gap_conn_rssi(conn_handle, &rssi);
+        return rssi;
+    }
+
+    /**
+     * @brief Get the device's own BLE address
+     * @return Pointer to static string containing address (cached on first call)
+     */
+    [[nodiscard]]
+    static const char* getAddress() {
+        static const std::string addr_str = NimBLEDevice::getAddress().toString();
+        return addr_str.c_str();
+    }
+
+    /**
+     * @brief Get connection info for a specific connection
+     * @param handle Connection handle
+     * @return NimBLEConnInfo object by value, or default-constructed if server not initialized
+     * @note Returns by value since NimBLE API returns temporary objects
+     */
+    [[nodiscard]]
+    static ConnectionInfoType getConnectionInfo(connection_handle_t handle) {
+        static ConnectionInfoType default_info{};
+        if (!server) return default_info;
+        return server->getPeerInfo(handle);
+    }
+
+    /**
+     * @brief Get all active connections
+     * @return Vector of NimBLEConnInfo objects for all connected peers
+     */
+    [[nodiscard]]
+    static std::vector<ConnectionInfoType> getConnections() {
+        std::vector<ConnectionInfoType> result;
+        if (!server) return result;
+
+        for (auto handle : server->getPeerDevices()) {
+            result.push_back(server->getPeerInfo(handle));
+        }
+        return result;
     }
 
     // ---------------------- Runtime Configuration ----------------------
@@ -720,25 +923,27 @@ struct ServerBackend<ServerBase<DeviceName, ShortName, Derived, Args...>> {
     }
 
     /**
-     * @brief Configure BLE advertising with two-layer priority system
+     * @brief Configure BLE advertising with a two-layer priority system
      * @details Applies advertising configuration using priority:
      *          1. Runtime state (set via setTxPower/setAdvInterval)
-     *          2. Compile-time defaults (from AdvertisingConfig template)
+     *          2. Compile-time defaults (from AdvertisementConfig template)
      *          3. NimBLE stack defaults (if neither provided)
      *
-     * @tparam PassiveServices Tuple of services advertised in main packet
+     * Names are read from Config (ServerBase):
+     *   - device_name: Short name, always used in advertising packet
+     *   - device_long_name: Long name, if not nullptr - enables scan response
+     *
+     * @tparam PassiveServices Tuple of services advertised in the main packet
      * @tparam ActiveServices Tuple of services advertised in scan response
-     * @param device_name Full device name (scan response)
-     * @param short_name Short name (advertising packet)
      */
     template<typename PassiveServices, typename ActiveServices>
-    static void configureAdvertising(const char* device_name, const char* short_name) {
+    static void configureAdvertising() {
         using AdvConfig = typename Config::AdvConfig;
 
         if (!adv) return;
 
-        // Enable scan response for extended data
-        adv->enableScanResponse(true);
+        constexpr const char* short_name = Config::device_name;
+        constexpr const char* long_name = Config::device_long_name;
 
         // Configure advertisement data (passive services + short name + manufacturer data)
         NimBLEAdvertisementData adv_data;
@@ -764,11 +969,29 @@ struct ServerBackend<ServerBase<DeviceName, ShortName, Derived, Args...>> {
 
         adv->setAdvertisementData(adv_data);
 
-        // Configure scan response data (active services + full name)
-        NimBLEAdvertisementData scan_resp;
-        scan_resp.setName(device_name, true);
-        blex_nimble::add_service_uuids_impl(scan_resp, ActiveServices{});
-        adv->setScanResponseData(scan_resp);
+        // Enable scan response if long name OR active services are configured
+        constexpr bool has_active_services = !std::is_same_v<ActiveServices, std::tuple<>>;
+
+        if constexpr (long_name != nullptr || has_active_services) {
+            // Enable scan response for extended data
+            adv->enableScanResponse(true);
+
+            // Configure scan response data (active services + name)
+            NimBLEAdvertisementData scan_resp;
+
+            // Use a long name if provided, otherwise use a short name
+            if constexpr (long_name != nullptr) {
+                scan_resp.setName(long_name, true);
+            } else {
+                scan_resp.setName(short_name, false);
+            }
+
+            blex_nimble::add_service_uuids_impl(scan_resp, ActiveServices{});
+            adv->setScanResponseData(scan_resp);
+        } else {
+            // No scan response data configured - disable scan response (passive only)
+            adv->enableScanResponse(false);
+        }
 
         // Apply TX power with two-layer priority
         int8_t tx_power;

@@ -1,44 +1,98 @@
+/**
+ * @file basic_server.ino
+ * @brief Basic BLE peripheral example with essential BLEX configuration
+ *
+ * @details
+ * Demonstrates:
+ * - Advertising configuration (TX power, intervals, appearance, manufacturer data)
+ * - Connection configuration (MTU, intervals)
+ * - Server callbacks (connect, disconnect)
+ * - Standard BLE characteristics (temperature, LED control)
+ * - Device Information Service
+ */
+
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <blex.hpp>
 
-// Forward declarations for callbacks (declared after includes so NimBLEConnInfo is available)
-static void onConnect(NimBLEConnInfo& conn);
-static void onDisconnect(NimBLEConnInfo& conn, int reason);
 
-// Define your device
-inline constexpr char deviceName[] = "MyDevice";
-inline constexpr char deviceNameShort[] = "MyDev";
+// ============================================================================
+// Application State
+// ============================================================================
+static constexpr float TEMP_INITIAL = 25.0f;
+static constexpr float TEMP_MIN = 20.0f;
+static constexpr float TEMP_MAX = 30.0f;
+static constexpr float TEMP_CHANGE_MAX = 1.0f;  // Max change per update: ±1.0°C
+static constexpr uint32_t UPDATE_INTERVAL_MS = 5000;  // Update every 5 seconds
 
-// Choose a lock policy
-using MyBlex = blexDefault;  // Thread-safe for multi-core
-// using MyBlex = blex<NoLock>;  // Zero-overhead for single-core
+static float temperature = TEMP_INITIAL;
 
-// Declare a BLE peripheral device using fluent API
+// ============================================================================
+// Characteristic callbacks
+// ============================================================================
+static void onTemperatureRead(float& value) {
+    value = temperature;
+    Serial.printf("Temperature read: %.1f°C\n", value);
+}
+
+// ============================================================================
+// Server callbacks
+// ============================================================================
+
+static void onConnect(NimBLEConnInfo& conn) {
+    Serial.printf("Connected: %s\n", conn.getAddress().toString().c_str());
+}
+
+static void onDisconnect(NimBLEConnInfo& conn, int reason) {
+    Serial.printf("Disconnected: %s (reason: %d)\n\n"
+        "Waiting for connection..\n",
+        conn.getAddress().toString().c_str(),
+        reason
+    );
+    NimBLEDevice::startAdvertising();
+}
+
+// ============================================================================
+// BLE Server Configuration
+// ============================================================================
+inline constexpr char deviceName[] = "BlexBasic";
+inline constexpr char deviceNameLong[] = "Blex Basic Peripheral";
+
+using MyBlex = blexDefault;
+
+/// Temperature characteristic (standard BLE UUID 0x2A6E)
+using TempChar = MyBlex::Characteristic<
+    float,
+    0x2A6E,
+    MyBlex::Permissions<>::AllowRead::AllowNotify,
+    MyBlex::CharacteristicCallbacks<>::WithOnRead<onTemperatureRead>
+>;
+
+/// Environmental Sensing Service (standard BLE UUID 0x181A)
+using EnvironmentalService = MyBlex::Service<
+    0x181A,
+    TempChar
+>;
+
 using MyDevice = MyBlex::Server<
     deviceName,
-    deviceNameShort,
+    deviceNameLong,
 
-    // // Advertising Configuration
-    // MyBlex::AdvertisingConfig<>
-    //     ::WithTxPower<9>
-    //     ::WithAppearance<MyBlex::BleAppearance::kGenericComputer>
-    //     ::WithIntervals<100, 200>,
+    // Advertising Configuration
+    MyBlex::AdvertisementConfig<>
+        ::WithManufacturerData<>
+            ::WithManufacturerId<0xFFFE>        // Unofficial Blim company id
+            ::WithDeviceType<0xFE>              // uint8_t device type
+        ::WithTxPower<3>                        // TX power: 3 dBm
+        ::WithAppearance<MyBlex::BleAppearance::kSensor>
+        ::WithIntervals<100, 200>,              // Advertising: 100-200ms
 
-    // // Connection Configuration
-    // MyBlex::ConnectionConfig<>
-    //     ::WithMTU<517>
-    //     ::WithIntervals<12, 24>
-    //     ::WithLatency<0>
-    //     ::WithTimeout<4000>,
-    //
-    // // Security Configuration
-    // MyBlex::SecurityConfig<>
-    //     ::WithIOCapabilities<DisplayYesNo>
-    //     ::WithMITM<true>
-    //     ::WithBonding<true>
-    //     ::WithSecureConnections<true>
-    //     ::WithPasskey<123456>,
+
+    // Connection Configuration
+    MyBlex::ConnectionConfig<>
+        ::WithMTU<247>                      // MTU: 247 bytes
+        ::WithIntervals<100, 200>           // Connection: 100-200ms
+        ::WithTimeout<4000>,                // Timeout: 4s
 
     // Server Callbacks
     MyBlex::ServerCallbacks<>
@@ -46,31 +100,55 @@ using MyDevice = MyBlex::Server<
         ::WithOnDisconnect<onDisconnect>,
 
     // Services
-    MyBlex::ActiveAdvService<DeviceInfoService<MyBlex>>
+    MyBlex::PassiveAdvService<DeviceInfoService<MyBlex>>,
+    MyBlex::ActiveAdvService<EnvironmentalService>
 >;
-
-// Callback implementations
-static void onConnect(NimBLEConnInfo& conn) {
-    Serial.printf("Connected: %s\n", conn.getAddress().toString().c_str());
-}
-
-static void onDisconnect(NimBLEConnInfo& conn, int reason) {
-    Serial.printf("Disconnected: reason=%d\n", reason);
-    NimBLEDevice::startAdvertising();
-}
 
 void setup() {
     Serial.begin(115200);
+    delay(1000);
 
-    // Initialize BLE server
-    if (!MyDevice::init()) {
-        Serial.println("BLE initialization failed!");
+    Serial.println("Blex Basic Peripheral Example");
+
+    // startAllServices() auto-initializes if needed
+    if (!MyDevice::startAllServices()) {
+        Serial.println("ERROR: BLE initialization/service start failed");
         return;
     }
 
-    Serial.println("BLE server started");
+    Serial.printf("BLE server started:\n"
+                  "     Device Name: %s\n"
+                  "     Device Address: %s\n\n"
+                  "     Services:\n"
+                  "         Device Information (0x180A)\n"
+                  "         Environmental Sensing (0x181A)\n"
+                  "             - Temperature (0x2A6E): read, notify\n\n"
+                  "Waiting for connection..\n",
+                  deviceNameLong,
+                  MyDevice::getAddress());
 }
 
 void loop() {
-    delay(1000);
+    // Simulate temperature changes: random walk within ±TEMP_CHANGE_MAX
+    float change = (random(-10, 11) / 10.0f) * TEMP_CHANGE_MAX;
+    temperature += change;
+    temperature = constrain(temperature, TEMP_MIN, TEMP_MAX);
+
+    // Notify connected clients
+    if (MyDevice::isConnected()) {
+        TempChar::setValue(temperature);
+        Serial.printf("Temperature updated: %.1f°C\n", temperature);
+    }
+
+    // Print active connections
+    auto connections = MyDevice::getConnections();
+    Serial.printf("\nActive connections: %u\n", connections.size());
+    for (const auto& conn : connections) {
+        Serial.printf("  - %s (RSSI: %d dBm)\n",
+                      conn.getAddress().toString().c_str(),
+                      MyDevice::getRSSI(conn.getConnHandle()));
+    }
+    Serial.println();
+
+    delay(UPDATE_INTERVAL_MS);
 }

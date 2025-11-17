@@ -10,7 +10,7 @@
  * # Layer Responsibilities
  * - C++20 concepts for type validation
  * - CRTP base classes for characteristics, services, and servers
- * - Fluent builder configuration types (Permissions, AdvertisingConfig, etc.)
+ * - Fluent builder configuration types (Permissions, AdvertisementConfig, etc.)
  * - Compile-time metaprogramming utilities (type filtering, extraction)
  * - Backend-agnostic metadata definitions
  *
@@ -37,23 +37,30 @@ struct blex;
 
 namespace blex_core {
 
+// ---------------------- Type Utilities ----------------------
+
+/// @brief C++20 std::remove_cvref_t replacement for older compilers
+template<typename T>
+using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
+
 // ---------------------- C++20 Concepts ----------------------
 
-// UUID type concept
+/// @brief UUID type validation concept
+/// @details Accepts integral types (uint16_t), char pointers (char*), or char arrays (char[])
 template<typename T>
 concept UuidType = requires {
-    requires std::is_integral_v<std::remove_cv_t<std::remove_reference_t<T>>> ||
-             std::is_same_v<std::remove_cv_t<std::remove_pointer_t<std::remove_cv_t<std::remove_reference_t<T>>>>, char> ||
-             std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_cv_t<std::remove_reference_t<T>>>>, char>;
+    requires std::is_integral_v<remove_cvref_t<T>> ||
+             std::is_same_v<remove_cvref_t<std::remove_pointer_t<T>>, char> ||
+             std::is_same_v<remove_cvref_t<std::remove_extent_t<T>>, char>;
 };
 
 // Service wrapper concept
 template<typename T>
 concept ServiceWrapper = requires { typename T::service_type; };
 
-// Advertising config concept
+// Advertisement config concept
 template<typename T>
-concept AdvertisingConfigType = requires { typename T::is_blex_advertising_config_tag; };
+concept AdvertisementConfigType = requires { typename T::is_blex_advertisement_config_tag; };
 
 // Connection config concept
 template<typename T>
@@ -79,12 +86,12 @@ concept IsPresentationFormatDescriptor = requires { typename T::is_presentation_
 
 // UUID type validation (compile-time evaluation)
 template<typename T>
-static constexpr void check_uuid_type() {
+static constexpr void check_uuid_type() noexcept {
     static_assert(UuidType<T>, "UUID must be an integer (e.g., uint16_t) or a C string (char*/char[])");
 }
 
 // Compile-time string length helper
-static constexpr size_t const_strlen(const char* str) {
+static constexpr size_t const_strlen(const char* str) noexcept {
     return *str ? 1 + const_strlen(str + 1) : 0;
 }
 
@@ -117,49 +124,17 @@ struct unwrap_service_impl<T, std::enable_if_t<ServiceWrapper<T>>> {
 template<typename T>
 using unwrap_service = typename unwrap_service_impl<T>::type;
 
-// Pack wrappers to hold types as template parameter packs (not tuples)
-template<typename... /*Services*/>
-struct ServicesPack {};
+/// @brief Type aliases for template parameter packs using std::tuple
+/// @details Eliminates custom pack types - std::tuple provides identical functionality
+///          with better consistency and no forced conversions between pack types
+template<typename... Services>
+using ServicesPack = std::tuple<Services...>;
 
-template<typename... /*Chars*/>
-struct CharsPack {};
+template<typename... Chars>
+using CharsPack = std::tuple<Chars...>;
 
-template<typename... /*Descs*/>
-struct DescriptorsPack {};
-
-// Service filtering (returns a tuple for advertising configuration)
-template<template<typename> class Predicate, typename... Services>
-struct filter_services;
-
-template<template<typename> class Predicate>
-struct filter_services<Predicate> {
-    using type = std::tuple<>;
-};
-
-template<template<typename> class Predicate, typename First, typename... Rest>
-struct filter_services<Predicate, First, Rest...> {
-    using filtered_rest = typename filter_services<Predicate, Rest...>::type;
-    using type = std::conditional_t<
-        Predicate<First>::value,
-        decltype(std::tuple_cat(std::tuple<First>{}, filtered_rest{})),
-        filtered_rest
-    >;
-};
-
-// Apply filter_services to ServicesPack
-template<template<typename> class Predicate, typename SvcPack>
-struct filter_services_pack;
-
-template<template<typename> class Predicate, typename... Services>
-struct filter_services_pack<Predicate, ServicesPack<Services...>> {
-    using type = typename filter_services<Predicate, Services...>::type;
-};
-
-// Presentation Format descriptor detection (concept-based)
-template<typename T>
-static constexpr bool has_presentation_format_marker() {
-    return IsPresentationFormatDescriptor<T>;
-}
+template<typename... Descs>
+using DescriptorsPack = std::tuple<Descs...>;
 
 // Predicates for filtering (concept-based with SFINAE fallback for member access)
 template<typename T, typename = void>
@@ -176,49 +151,67 @@ template<typename T>
 struct is_active_adv_pred<T, std::enable_if_t<ServiceWrapper<T>>>
     : std::bool_constant<T::active_adv> {};
 
-// Config type detection traits (needed for SFINAE/template metaprogramming)
-template<typename T>
-struct is_advertising_config : std::bool_constant<AdvertisingConfigType<T>> {};
-
-template<typename T>
-struct is_connection_config : std::bool_constant<ConnectionConfigType<T>> {};
-
-template<typename T>
-struct is_security_config : std::bool_constant<SecurityConfigType<T>> {};
-
-template<typename T>
-struct is_server_callbacks_config : std::bool_constant<ServerCallbacksConfigType<T>> {};
-
-template<typename T>
-struct is_char_callbacks_config : std::bool_constant<CharCallbacksConfigType<T>> {};
-
-// Helper to concatenate ServicesPack types
+/// @brief Generic pack concatenation (works with std::tuple and type aliases)
+/// @details Concatenates two tuple-like types into a single tuple
 template<typename Pack1, typename Pack2>
-struct concat_pack;
+struct concat_packs;
 
-template<typename... S1, typename... S2>
-struct concat_pack<ServicesPack<S1...>, ServicesPack<S2...>> {
-    using type = ServicesPack<S1..., S2...>;
+template<typename... T1, typename... T2>
+struct concat_packs<std::tuple<T1...>, std::tuple<T2...>> {
+    using type = std::tuple<T1..., T2...>;
 };
 
-// Filter out config types and server callbacks to get only Services
-template<typename...>
-struct filter_non_config {
-    using type = ServicesPack<>;  // Base case: empty pack
+// ---------------------- Generic Filter (DRY principle) ----------------------
+
+/**
+ * @brief Generic type filter: keeps or excludes types based on predicate
+ * @tparam Predicate Template template parameter - trait with ::value member
+ * @tparam ResultPack Pack type to return (std::tuple, ServicesPack, DescriptorsPack, etc.)
+ * @tparam IncludeOnMatch true = keep matching types, false = exclude matching types
+ * @tparam Types Variadic pack to filter
+ */
+template<template<typename> class Predicate, template<typename...> class ResultPack, bool IncludeOnMatch, typename...>
+struct filter_types {
+    using type = ResultPack<>;  // Base case: empty pack
 };
 
-template<typename First, typename... Rest>
-struct filter_non_config<First, Rest...> {
-    using filtered_rest = typename filter_non_config<Rest...>::type;
+template<template<typename> class Predicate, template<typename...> class ResultPack, bool IncludeOnMatch, typename First, typename... Rest>
+struct filter_types<Predicate, ResultPack, IncludeOnMatch, First, Rest...> {
+    using filtered_rest = typename filter_types<Predicate, ResultPack, IncludeOnMatch, Rest...>::type;
     using type = std::conditional_t<
-        (is_advertising_config<First>::value ||
-         is_connection_config<First>::value ||
-         is_security_config<First>::value ||
-         is_server_callbacks_config<First>::value),
-        filtered_rest,
-        typename concat_pack<ServicesPack<First>, filtered_rest>::type
+        Predicate<First>::value == IncludeOnMatch,
+        typename concat_packs<ResultPack<First>, filtered_rest>::type,
+        filtered_rest
     >;
 };
+
+/// @brief Predicate: detects any config type (advertisement, connection, security, server callbacks)
+template<typename T>
+struct is_any_config : std::bool_constant<
+    AdvertisementConfigType<T> ||
+    ConnectionConfigType<T> ||
+    SecurityConfigType<T> ||
+    ServerCallbacksConfigType<T>
+> {};
+
+// ---------------------- Specialized Filters (using generic pattern) ----------------------
+
+/// @brief Service filtering (returns a tuple for advertising configuration)
+template<template<typename> class Predicate, typename... Services>
+using filter_services = filter_types<Predicate, std::tuple, true, Services...>;
+
+/// @brief Apply filter_services to ServicesPack
+template<template<typename> class Predicate, typename SvcPack>
+struct filter_services_pack;
+
+template<template<typename> class Predicate, typename... Services>
+struct filter_services_pack<Predicate, ServicesPack<Services...>> {
+    using type = typename filter_types<Predicate, std::tuple, true, Services...>::type;
+};
+
+/// @brief Filter out config types and server callbacks to get only Services
+template<typename... Args>
+using filter_non_config = filter_types<is_any_config, std::tuple, false, Args...>;
 
 // Callback validation
 template<typename T, auto CallbackFunc>
@@ -241,8 +234,8 @@ enum BleIOCapability : uint8_t {
 };
 
 // Forward declarations for config templates (needed by extract helpers)
-template<int8_t, uint16_t, uint16_t, auto, const uint8_t*, size_t>
-struct AdvertisingConfig;
+template<int8_t, uint16_t, uint16_t, auto, const auto&>
+struct AdvertisementConfig;
 
 template<uint16_t, uint16_t, uint16_t, uint16_t, uint16_t>
 struct ConnectionConfig;
@@ -258,56 +251,65 @@ struct CharacteristicCallbacks;
 
 namespace blex_core {
 
-// Extract CharacteristicCallbacks from variadic args, or use default
-template<typename...>
-struct extract_char_callbacks {
-    // Default: all callbacks nullptr
-    using type = CharacteristicCallbacks<nullptr, nullptr, nullptr, nullptr>;
+// ---------------------- Generic Extractor (DRY principle) ----------------------
+
+/**
+ * @brief Generic extractor: finds first type matching Predicate, or returns Default
+ * @tparam Predicate Template template parameter - trait with ::value member
+ * @tparam Default Type to return if no match found
+ * @tparam Args Variadic pack to search
+ */
+template<template<typename> class Predicate, typename Default, typename...>
+struct extract_first_matching {
+    using type = Default;
 };
 
-template<typename First, typename... Rest>
-struct extract_char_callbacks<First, Rest...> {
+template<template<typename> class Predicate, typename Default, typename First, typename... Rest>
+struct extract_first_matching<Predicate, Default, First, Rest...> {
     using type = std::conditional_t<
-        is_char_callbacks_config<First>::value,
+        Predicate<First>::value,
         First,
-        typename extract_char_callbacks<Rest...>::type
+        typename extract_first_matching<Predicate, Default, Rest...>::type
     >;
 };
 
-// Helper to concatenate DescriptorsPack
-template<typename Pack1, typename Pack2>
-struct concat_descriptors;
+// ---------------------- Specialized Extractors (using generic pattern) ----------------------
 
-template<typename... D1, typename... D2>
-struct concat_descriptors<DescriptorsPack<D1...>, DescriptorsPack<D2...>> {
-    using type = DescriptorsPack<D1..., D2...>;
-};
+/// @brief Predicate wrapper for CharCallbacksConfigType concept (for use in metaprogramming)
+template<typename T>
+struct is_char_callbacks_pred : std::bool_constant<CharCallbacksConfigType<T>> {};
+
+/// @brief Extract CharacteristicCallbacks from variadic args, or use default
+template<typename... Args>
+using extract_char_callbacks = extract_first_matching<
+    is_char_callbacks_pred,
+    CharacteristicCallbacks<nullptr, nullptr, nullptr, nullptr>,
+    Args...
+>;
 
 // ---------------------- Hybrid Concept + Static Assert Validation ----------------------
 
-// Validate that Args are either callback config or descriptor types
+/// @brief Validate that Args are either callback config or descriptor types
 template<typename T>
 struct is_valid_characteristic_arg : std::bool_constant<
-    is_char_callbacks_config<T>::value ||
+    CharCallbacksConfigType<T> ||
     // Accept any type as a potential descriptor (will be validated by descriptor traits later)
     !std::is_same_v<T, std::nullptr_t>  // Reject nullptr_t
 > {};
 
-// Macros for cleaner error message formatting
-#define BLEX_ERROR_HEADER \
-"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" \
-"❌  BLEX Characteristic Argument Error\n" \
-"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-
-#define BLEX_ERROR_FOOTER \
-"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+/// @brief Macros for consistent error message formatting across BLEX
+/// @details Provides visual separators and headers for static_assert compile-time errors
+#define BLEX_ERROR_SEP_LONG "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+#define BLEX_ERROR_SEP_SHORT "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+#define BLEX_ERROR_HEADER(title, sep) "\n" sep "\n" "❌  " title "\n" sep "\n"
+#define BLEX_ERROR_FOOTER(sep) sep "\n"
 
 // Individual argument validator with detailed static_assert - shows UUID, type, and position
 template<auto UUID, typename T, size_t Index>
 struct validate_single_arg {
     static_assert(
         is_valid_characteristic_arg<T>::value,
-        BLEX_ERROR_HEADER
+        BLEX_ERROR_HEADER("BLEX Characteristic Argument Error", BLEX_ERROR_SEP_LONG)
         "\n"
         "  ▸ LOOK ABOVE for: validate_single_arg<UUID, BAD_TYPE, INDEX>\n"
         "\n"
@@ -321,7 +323,7 @@ struct validate_single_arg {
         "  ✓ Valid:   Characteristic<T, UUID, Permissions<...>, CharacteristicCallbacks<>...>\n"
         "  ✗ Invalid: std::nullptr_t, raw function pointers\n"
         "\n"
-        BLEX_ERROR_FOOTER
+        BLEX_ERROR_FOOTER(BLEX_ERROR_SEP_LONG)
     );
     static constexpr bool value = true;
 };
@@ -350,85 +352,75 @@ concept AllValidCharArgs = validate_all_args_with_diagnostic_impl<
     Args...
 >::value;
 
-// Filter out callback configs to get only Descriptors
-template<typename...>
-struct filter_descriptors_from_args {
-    using type = DescriptorsPack<>;
+/// @brief Filter out callback configs to get only Descriptors
+template<typename... Args>
+using filter_descriptors_from_args = filter_types<is_char_callbacks_pred, std::tuple, false, Args...>;
+
+/// @brief Predicate wrapper for AdvertisementConfigType concept (for use in metaprogramming)
+template<typename T>
+struct is_advertisement_pred : std::bool_constant<AdvertisementConfigType<T>> {};
+
+/// @brief Predicate wrapper for ConnectionConfigType concept (for use in metaprogramming)
+template<typename T>
+struct is_connection_pred : std::bool_constant<ConnectionConfigType<T>> {};
+
+/// @brief Predicate wrapper for SecurityConfigType concept (for use in metaprogramming)
+template<typename T>
+struct is_security_pred : std::bool_constant<SecurityConfigType<T>> {};
+
+/// @brief Predicate wrapper for ServerCallbacksConfigType concept (for use in metaprogramming)
+template<typename T>
+struct is_server_callbacks_pred : std::bool_constant<ServerCallbacksConfigType<T>> {};
+
+/// @brief Unwrap AdvertisementConfig::type member if it exists (for builder support)
+/// @details If T has a nested `type` member, returns T::type; otherwise returns T
+template<typename T, typename = void>
+struct unwrap_adv_config_impl {
+    using type = T;
 };
 
-template<typename First, typename... Rest>
-struct filter_descriptors_from_args<First, Rest...> {
-    using filtered_rest = typename filter_descriptors_from_args<Rest...>::type;
-    using type = std::conditional_t<
-        is_char_callbacks_config<First>::value,
-        filtered_rest,
-        typename concat_descriptors<DescriptorsPack<First>, filtered_rest>::type
-    >;
+template<typename T>
+struct unwrap_adv_config_impl<T, std::void_t<typename T::type>> {
+    using type = typename T::type;
 };
 
+template<typename T>
+using unwrap_adv_config = typename unwrap_adv_config_impl<T>::type;
 
-// Extract AdvertisingConfig from variadic args, or void if not provided
-template<typename... /*Args*/>
-struct extract_adv_config {
-    using type = void;
-};
+/// @brief Extract AdvertisementConfig from variadic args, or void if not provided
+/// @details Automatically unwraps Builder::type to final AdvertisementConfig
+template<typename... Args>
+using extract_adv_config = unwrap_adv_config<
+    typename extract_first_matching<
+        is_advertisement_pred,
+        void,
+        Args...
+    >::type
+>;
 
-template<typename First, typename... Rest>
-struct extract_adv_config<First, Rest...> {
-    using type = std::conditional_t<
-        is_advertising_config<First>::value,
-        First,
-        typename extract_adv_config<Rest...>::type
-    >;
-};
+/// @brief Extract ConnectionConfig from variadic args, or void if not provided
+template<typename... Args>
+using extract_conn_config = extract_first_matching<
+    is_connection_pred,
+    void,
+    Args...
+>;
 
-// Extract ConnectionConfig from variadic args, or use default
-template<typename...>
-struct extract_conn_config {
-    // Default
-    using type = ConnectionConfig<0, 0, 0, 0, 0>;
-};
+/// @brief Extract SecurityConfig from variadic args, or void if not provided
+template<typename... Args>
+using extract_security_config = extract_first_matching<
+    is_security_pred,
+    void,
+    Args...
+>;
 
-template<typename First, typename... Rest>
-struct extract_conn_config<First, Rest...> {
-    using type = std::conditional_t<
-        is_connection_config<First>::value,
-        First,
-        typename extract_conn_config<Rest...>::type
-    >;
-};
-
-// Extract SecurityConfig from variadic args, or use default
-template<typename...>
-struct extract_security_config {
-    // Default: NoInputNoOutput, no MITM, bonding enabled, secure connections enabled, no passkey
-    using type = SecurityConfig<NoInputNoOutput, false, true, true, 0>;
-};
-
-template<typename First, typename... Rest>
-struct extract_security_config<First, Rest...> {
-    using type = std::conditional_t<
-        is_security_config<First>::value,
-        First,
-        typename extract_security_config<Rest...>::type
-    >;
-};
-
-// Extract ServerCallbacks from variadic args, or use default
-template<typename...>
-struct extract_server_callbacks {
-    // Default: all callbacks nullptr
-    using type = ServerCallbacks<nullptr, nullptr, nullptr>;
-};
-
-template<typename First, typename... Rest>
-struct extract_server_callbacks<First, Rest...> {
-    using type = std::conditional_t<
-        is_server_callbacks_config<First>::value,
-        First,
-        typename extract_server_callbacks<Rest...>::type
-    >;
-};
+/// @brief Extract ServerCallbacks from variadic args, or default (all nullptr) if not provided
+template<typename... Args>
+using extract_server_callbacks = extract_first_matching<
+    is_server_callbacks_pred,
+    ServerCallbacks<nullptr, nullptr, nullptr>,
+    Args...
+>;
 
 } // namespace blex_core
 
@@ -436,65 +428,77 @@ struct extract_server_callbacks<First, Rest...> {
 
 // Internal permissions implementation (hidden from public API)
 namespace detail {
+    /**
+     * @brief Security permission levels for BLE GATT operations
+     *
+     * @details Defines security requirements for BLE GATT operations:
+     * - Disabled: Operation not allowed
+     * - Unprotected: Operation allowed with no security requirements
+     * - Encrypted: Operation requires encrypted connection
+     * - Authenticated: Operation requires authenticated pairing (encrypted + authenticated)
+     * - Authorized: Operation requires authorization (encrypted + authenticated + authorized)
+     *
+     * @note Values 0-4 are intentionally chosen to fit in 3 bits for efficient packing
+     */
+    enum class SecPerm : uint8_t {
+        Disabled = 0,        // Operation disabled
+        Unprotected = 1,     // Allowed, no security required
+        Encrypted = 2,       // Requires encryption
+        Authenticated = 3,   // Requires authentication
+        Authorized = 4       // Requires authorization
+    };
+
     template<
-        bool read,
-        bool write,
-        bool writeNoResponse,
+        SecPerm read,
+        SecPerm write,
+        bool writeNoResp,
         bool notify,
         bool indicate,
-        uint8_t readSecurity,
-        uint8_t writeSecurity,
-        uint8_t writeNoRespSecurity,
-        uint8_t notifySecurity,
-        uint8_t indicateSecurity
+        bool broadcast
     >
     struct PermissionsImpl {
         // Marker for trait detection
         using is_blex_permissions_tag = void;
 
         // Compile-time validation
-        static_assert(readSecurity <= 3, "Read security level must be 0-3 (none/encrypt/auth/authorize)");
-        static_assert(writeSecurity <= 3, "Write security level must be 0-3 (none/encrypt/auth/authorize)");
-        static_assert(writeNoRespSecurity <= 3, "WriteNoResponse security level must be 0-3 (none/encrypt/auth/authorize)");
-        static_assert(notifySecurity <= 3, "Notify security level must be 0-3 (none/encrypt/auth/authorize)");
-        static_assert(indicateSecurity <= 3, "Indicate security level must be 0-3 (none/encrypt/auth/authorize)");
+        static_assert(read <= SecPerm::Authorized, "Invalid read security level");
+        static_assert(write <= SecPerm::Authorized, "Invalid write security level");
 
-        // API for NimBLE integration
-        static constexpr bool canRead = read;
-        static constexpr bool canWrite = write;
-        static constexpr bool canWriteNoResponse = writeNoResponse;
+        // API for NimBLE integration - operation enabled flags
+        static constexpr bool canRead = (read > SecPerm::Disabled);
+        static constexpr bool canWrite = (write > SecPerm::Disabled);
+        static constexpr bool canWriteNoResponse = writeNoResp;
         static constexpr bool canNotify = notify;
         static constexpr bool canIndicate = indicate;
+        static constexpr bool canBroadcast = broadcast;
 
-        // Derived security requirements (for NimBLE property flags)
-        static constexpr bool requireEncryption =
-            readSecurity >= 1 || writeSecurity >= 1 || writeNoRespSecurity >= 1 ||
-            notifySecurity >= 1 || indicateSecurity >= 1;
-        static constexpr bool requireAuthentication =
-            readSecurity >= 2 || writeSecurity >= 2 || writeNoRespSecurity >= 2 ||
-            notifySecurity >= 2 || indicateSecurity >= 2;
-        static constexpr bool requireAuthorization =
-            readSecurity >= 3 || writeSecurity >= 3 || writeNoRespSecurity >= 3 ||
-            notifySecurity >= 3 || indicateSecurity >= 3;
+        // Per-operation security levels (exposed for nimble.hpp)
+        // Convert SecPerm enum to numeric security level (0-4)
+        static constexpr uint8_t read_security = static_cast<uint8_t>(read);
+        static constexpr uint8_t write_security = static_cast<uint8_t>(write);
     };
-}
+
+
+} // namespace detail
 
 /**
  * @brief Compile-time fluent builder for BLE characteristic permissions with per-operation security.
  *
  * @details Provides a chainable API for defining BLE characteristic permissions with granular
  * security control per operation. Security levels follow BLE specification:
- * - Level 0: No security required
- * - Level 1: Encryption required
- * - Level 2: Authentication required (encrypted + authenticated pairing)
- * - Level 3: Authorization required (encrypted + authenticated + authorized)
+ * - Disabled: Operation not allowed
+ * - Unprotected: Operation allowed with no security
+ * - Encrypted: Operation requires encryption
+ * - Authenticated: Operation requires authentication (encrypted + authenticated pairing)
+ * - Authorized: Operation requires authorization (encrypted + authenticated + authorized)
  *
  * @par Basic Operations
- * - AllowRead - Enable read operation
- * - AllowWrite - Enable write operation
+ * - AllowRead - Enable read operation (no security)
+ * - AllowWrite - Enable write operation (no security)
  * - AllowWriteNoResponse - Enable write without response
  * - AllowNotify - Enable notifications
  * - AllowIndicate - Enable indications
+ * - AllowBroadcast - Enable broadcast
  *
  * @par Read with Security
  * - AllowEncryptedRead - Read requires encryption
@@ -505,21 +509,6 @@ namespace detail {
  * - AllowEncryptedWrite - Write requires encryption
  * - AllowAuthenticatedWrite - Write requires authentication
  * - AllowAuthorizedWrite - Write requires authorization
- *
- * @par WriteNoResponse with Security
- * - AllowEncryptedWriteNoResponse
- * - AllowAuthenticatedWriteNoResponse
- * - AllowAuthorizedWriteNoResponse
- *
- * @par Notify with Security
- * - AllowEncryptedNotify
- * - AllowAuthenticatedNotify
- * - AllowAuthorizedNotify
- *
- * @par Indicate with Security
- * - AllowEncryptedIndicate
- * - AllowAuthenticatedIndicate
- * - AllowAuthorizedIndicate
  *
  * @par Examples
  * @code
@@ -537,65 +526,40 @@ namespace detail {
  *       due to C++ language limitations. Hover over this type to see available builders.
  */
 template<
-    bool read = false,
-    bool write = false,
-    bool writeNoResponse = false,
+    detail::SecPerm read = detail::SecPerm::Disabled,
+    detail::SecPerm write = detail::SecPerm::Disabled,
+    bool writeNoResp = false,
     bool notify = false,
     bool indicate = false,
-    uint8_t readSecurity = 0,
-    uint8_t writeSecurity = 0,
-    uint8_t writeNoRespSecurity = 0,
-    uint8_t notifySecurity = 0,
-    uint8_t indicateSecurity = 0
+    bool broadcast = false
 >
-struct Permissions : detail::PermissionsImpl<read, write, writeNoResponse, notify, indicate,
-                                              readSecurity, writeSecurity, writeNoRespSecurity,
-                                              notifySecurity, indicateSecurity> {
-    /// @brief Enable `read` operation
-    using AllowRead = Permissions<true, write, writeNoResponse, notify, indicate, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
-    /// @brief Enable `write`
-    using AllowWrite = Permissions<read, true, writeNoResponse, notify, indicate, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
+struct Permissions : detail::PermissionsImpl<read, write, writeNoResp, notify, indicate, broadcast> {
+    /// @brief Enable `read` operation (no security)
+    using AllowRead = Permissions<detail::SecPerm::Unprotected, write, writeNoResp, notify, indicate, broadcast>;
+    /// @brief Enable `write` operation (no security)
+    using AllowWrite = Permissions<read, detail::SecPerm::Unprotected, writeNoResp, notify, indicate, broadcast>;
     /// @brief Enable `write without response`
-    using AllowWriteNoResponse = Permissions<read, write, true, notify, indicate, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
+    using AllowWriteNoResponse = Permissions<read, write, true, notify, indicate, broadcast>;
     /// @brief Enable `notify`
-    using AllowNotify = Permissions<read, write, writeNoResponse, true, indicate, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
-    /// @brief Enable  `indicate`
-    using AllowIndicate = Permissions<read, write, writeNoResponse, notify, true, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
+    using AllowNotify = Permissions<read, write, writeNoResp, true, indicate, broadcast>;
+    /// @brief Enable `indicate`
+    using AllowIndicate = Permissions<read, write, writeNoResp, notify, true, broadcast>;
+    /// @brief Enable `broadcast`
+    using AllowBroadcast = Permissions<read, write, writeNoResp, notify, indicate, true>;
 
-    /// @brief Enable `read` with encryption required (security level 1)
-    using AllowEncryptedRead = Permissions<true, write, writeNoResponse, notify, indicate, 1, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
-    /// @brief Enable `read` with authentication required (security level 2)
-    using AllowAuthenticatedRead = Permissions<true, write, writeNoResponse, notify, indicate, 2, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
-    /// @brief Enable  `read` with authorization required (security level 3)
-    using AllowAuthorizedRead = Permissions<true, write, writeNoResponse, notify, indicate, 3, writeSecurity, writeNoRespSecurity, notifySecurity, indicateSecurity>;
+    /// @brief Enable `read` with encryption required
+    using AllowEncryptedRead = Permissions<detail::SecPerm::Encrypted, write, writeNoResp, notify, indicate, broadcast>;
+    /// @brief Enable `read` with authentication required
+    using AllowAuthenticatedRead = Permissions<detail::SecPerm::Authenticated, write, writeNoResp, notify, indicate, broadcast>;
+    /// @brief Enable `read` with authorization required
+    using AllowAuthorizedRead = Permissions<detail::SecPerm::Authorized, write, writeNoResp, notify, indicate, broadcast>;
 
-    /// @brief Enable `write` with encryption required (security level 1)
-    using AllowEncryptedWrite = Permissions<read, true, writeNoResponse, notify, indicate, readSecurity, 1, writeNoRespSecurity, notifySecurity, indicateSecurity>;
-    /// @brief Enable `write` with authentication required (security level 2)
-    using AllowAuthenticatedWrite = Permissions<read, true, writeNoResponse, notify, indicate, readSecurity, 2, writeNoRespSecurity, notifySecurity, indicateSecurity>;
-    /// @brief Enable `write` with authorization required (security level 3)
-    using AllowAuthorizedWrite = Permissions<read, true, writeNoResponse, notify, indicate, readSecurity, 3, writeNoRespSecurity, notifySecurity, indicateSecurity>;
-
-    /// @brief Enable `write-no-response` with encryption required (security level 1)
-    using AllowEncryptedWriteNoResponse = Permissions<read, write, true, notify, indicate, readSecurity, writeSecurity, 1, notifySecurity, indicateSecurity>;
-    /// @brief Enable `write-no-response` with authentication required (security level 2)
-    using AllowAuthenticatedWriteNoResponse = Permissions<read, write, true, notify, indicate, readSecurity, writeSecurity, 2, notifySecurity, indicateSecurity>;
-    /// @brief Enable `write-no-response` with authorization required (security level 3)
-    using AllowAuthorizedWriteNoResponse = Permissions<read, write, true, notify, indicate, readSecurity, writeSecurity, 3, notifySecurity, indicateSecurity>;
-
-    /// @brief Enable `notify` with encryption required (security level 1)
-    using AllowEncryptedNotify = Permissions<read, write, writeNoResponse, true, indicate, readSecurity, writeSecurity, writeNoRespSecurity, 1, indicateSecurity>;
-    /// @brief Enable `notify` with authentication required (security level 2)
-    using AllowAuthenticatedNotify = Permissions<read, write, writeNoResponse, true, indicate, readSecurity, writeSecurity, writeNoRespSecurity, 2, indicateSecurity>;
-    /// @brief Enable `notify` with authorization required (security level 3)
-    using AllowAuthorizedNotify = Permissions<read, write, writeNoResponse, true, indicate, readSecurity, writeSecurity, writeNoRespSecurity, 3, indicateSecurity>;
-
-    /// @brief Enable `indicate` with encryption required (security level 1)
-    using AllowEncryptedIndicate = Permissions<read, write, writeNoResponse, notify, true, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, 1>;
-    /// @brief Enable `indicate` with authentication required (security level 2)
-    using AllowAuthenticatedIndicate = Permissions<read, write, writeNoResponse, notify, true, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, 2>;
-    /// @brief Enable `indicate` with authorization required (security level 3)
-    using AllowAuthorizedIndicate = Permissions<read, write, writeNoResponse, notify, true, readSecurity, writeSecurity, writeNoRespSecurity, notifySecurity, 3>;
+    /// @brief Enable `write` with encryption required
+    using AllowEncryptedWrite = Permissions<read, detail::SecPerm::Encrypted, writeNoResp, notify, indicate, broadcast>;
+    /// @brief Enable `write` with authentication required
+    using AllowAuthenticatedWrite = Permissions<read, detail::SecPerm::Authenticated, writeNoResp, notify, indicate, broadcast>;
+    /// @brief Enable `write` with authorization required
+    using AllowAuthorizedWrite = Permissions<read, detail::SecPerm::Authorized, writeNoResp, notify, indicate, broadcast>;
 };
 
 // ---------------------- Forward Declarations for Final Types ----------------------
@@ -734,6 +698,9 @@ struct ServiceBase {
 
     using Base = std::conditional_t<std::is_void_v<Derived>, ServiceBase, Derived>;  // CRTP
     static constexpr auto uuid = UUID;
+
+    /// Characteristics pack - public typedef for SFINAE detection in multiple inheritance
+    /// This ensures chars_pack is unambiguous even when Service is one of multiple bases
     using chars_pack = blex_core::CharsPack<Chars...>;
 
     // Validate all characteristics' descriptors at compile-time
@@ -742,19 +709,316 @@ struct ServiceBase {
     }
 };
 
+// ---------------------- Manufacturer Data Builder ----------------------
+
+namespace blex_core {
+
+// TLV (Type-Length-Value) constants for manufacturer data
+namespace TLV {
+    constexpr uint8_t DEVICE_TYPE = 0x01;      ///< Device type identifier
+    // Add more custom TLV types as needed
+}
+
+/**
+ * @brief TLV entry for manufacturer data
+ * @tparam Type TLV type identifier
+ * @tparam Values TLV value bytes
+ */
+template<uint8_t Type, uint8_t... Values>
+struct TLVEntry {
+    static constexpr uint8_t data[] = {Type, sizeof...(Values), Values...};
+    static constexpr size_t size = sizeof(data);
+};
+
+template<uint8_t Type, uint8_t... Values>
+constexpr uint8_t TLVEntry<Type, Values...>::data[];
+
+/**
+ * @brief Manufacturer data builder using TLV format
+ * @details Apple-compatible TLV (Type-Length-Value) format
+ *
+ * # Format:
+ * - Bytes 0-1: Manufacturer ID (uint16_t, little-endian)
+ * - Byte 2+:   TLV entries (Type, Length, Value...)
+ *
+ * # Example:
+ * @code
+ * ::WithManufacturerData<>::WithManufacturerId<0x1234>
+ *       ::WithDeviceType<0x01>
+ *       ::WithTLV<0x02, 1, 2, 3>
+ * @endcode
+ */
+template<uint16_t ManufacturerId = 0xFFFF, uint8_t... TLVBytes>
+struct ManufacturerDataBuilder {
+    static constexpr uint8_t data[] = {
+        static_cast<uint8_t>(ManufacturerId & 0xFF),
+        static_cast<uint8_t>((ManufacturerId >> 8) & 0xFF),
+        TLVBytes...
+    };
+
+    static constexpr size_t size = sizeof(data);
+
+    /// Set manufacturer ID
+    template<uint16_t NewId>
+    using WithManufacturerId = ManufacturerDataBuilder<NewId, TLVBytes...>;
+
+    /// Add TLV entry (Type, Length auto-calculated, Value...)
+    template<uint8_t Type, uint8_t... Values>
+    using WithTLV = ManufacturerDataBuilder<ManufacturerId, TLVBytes..., Type, sizeof...(Values), Values...>;
+
+    /// Add device type TLV (convenience method)
+    template<uint8_t DeviceType>
+    using WithDeviceType = WithTLV<TLV::DEVICE_TYPE, DeviceType>;
+};
+
+// Storage for a data array
+template<uint16_t ManufacturerId, uint8_t... TLVBytes>
+constexpr uint8_t ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data[];
+
+} // namespace blex_core
+
 // ---------------------- Configuration Templates ----------------------
 
-// AdvertisingConfig: Compile-time fluent builder for advertising configuration
+// Internal implementation details for AdvertisementConfig (hidden from user-facing API)
+namespace adv_config_detail {
+    // Exit validation helpers (hidden from Builder's public API)
+    template<
+        int8_t TxPower,
+        uint16_t IntervalMin,
+        uint16_t IntervalMax,
+        auto Appearance,
+        uint16_t ManufacturerId,
+        bool ManufacturerIdSet,
+        uint8_t... TLVBytes
+    >
+    struct BuilderExitValidation {
+        static constexpr void validate_complete() noexcept {
+            static_assert(ManufacturerIdSet,
+                "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "❌  BLEX Manufacturer Data Builder Error\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "\n"
+                "Manufacturer ID is required when using builder mode!\n"
+                "\n"
+                "You must call:\n"
+                "  ::WithManufacturerId<...>  (required)\n"
+                "\n"
+                "Optional TLV entries:\n"
+                "  ::WithDeviceType<...>        // Convenience for device type TLV\n"
+                "  ::WithTLV<Type, Values...>   // Custom TLV entries\n"
+                "\n"
+                "✓ Correct (minimal):\n"
+                "    ::WithManufacturerData<>\n"
+                "        ::WithManufacturerId<0x1234>\n"
+                "    ::WithAppearance<...>\n"
+                "\n"
+                "✓ Correct (with TLV):\n"
+                "    ::WithManufacturerData<>\n"
+                "        ::WithManufacturerId<0x1234>\n"
+                "        ::WithDeviceType<0x01>\n"
+                "    ::WithAppearance<...>\n"
+                "\n"
+                "✗ Missing ManufacturerId:\n"
+                "    ::WithManufacturerData<>\n"
+                "        ::WithDeviceType<0x01>  // ← Missing WithManufacturerId!\n"
+                "    ::WithAppearance<...>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+        }
+
+        template<int8_t NewTxPower>
+        struct ExitWithTxPower_Impl {
+            static constexpr auto _ = (validate_complete(), 0);
+            using type = AdvertisementConfig<NewTxPower, IntervalMin, IntervalMax, Appearance,
+                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data>;
+        };
+
+        template<uint16_t NewMin, uint16_t NewMax>
+        struct ExitWithIntervals_Impl {
+            static constexpr auto _ = (validate_complete(), 0);
+            using type = AdvertisementConfig<TxPower, NewMin, NewMax, Appearance,
+                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data>;
+        };
+
+        template<auto NewAppearance>
+        struct ExitWithAppearance_Impl {
+            static constexpr auto _ = (validate_complete(), 0);
+            using type = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance,
+                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data>;
+        };
+    };
+
+    /// @brief Dual-mode manufacturer data implementation (internal - do not use directly)
+    template<
+        int8_t TxPower,
+        uint16_t IntervalMin,
+        uint16_t IntervalMax,
+        auto Appearance,
+        const auto&... Data
+    >
+    struct WithManufacturerDataT {
+        static constexpr size_t param_count = sizeof...(Data);
+
+        // Validate parameter count
+        static_assert(param_count <= 1,
+            "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "❌  BLEX Manufacturer Data Error\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "\n"
+            "WithManufacturerData accepts ONLY:\n"
+            "  - 0 parameters (builder mode)\n"
+            "  - 1 parameter (raw value - uint8_t[])\n"
+            "\n"
+            "✓ Correct: ::WithManufacturerData<>\n"
+            "✓ Correct: ::WithManufacturerData<myData>\n"
+            "✗ Invalid: ::WithManufacturerData<myData, otherData>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+        // Builder mode implementation (when param_count == 0)
+        template<
+            uint16_t ManufacturerId = 0xFFFF,
+            bool ManufacturerIdSet = false,
+            uint8_t... TLVBytes
+        >
+        struct Builder {
+            using ExitHelper = BuilderExitValidation<TxPower, IntervalMin, IntervalMax, Appearance,
+                                                      ManufacturerId, ManufacturerIdSet, TLVBytes...>;
+
+            /// @brief Marker for trait detection - allows builder to be recognized as AdvertisementConfig
+            using is_blex_advertisement_config_tag = void;
+
+            /// @brief Default type resolution - allows builder to be used as final config without explicit exit
+            /// @details Validates manufacturer ID is set and returns AdvertisementConfig with current state.
+            ///          Note: This creates the final AdvertisementConfig directly without validation,
+            ///          relying on compile-time checks at the point of actual use.
+            using type = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, Appearance,
+                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data>;
+
+            /// Set manufacturer ID
+            template<uint16_t NewId>
+            using WithManufacturerId = Builder<NewId, true, TLVBytes...>;
+
+            /// Add TLV entry (Type, Length auto-calculated, Value...)
+            template<uint8_t Type, uint8_t... Values>
+            using WithTLV = Builder<ManufacturerId, ManufacturerIdSet, TLVBytes..., Type, sizeof...(Values), Values...>;
+
+            /// Add device type TLV (convenience method)
+            template<uint8_t DeviceType>
+            using WithDeviceType = WithTLV<blex_core::TLV::DEVICE_TYPE, DeviceType>;
+
+            // Exit methods - validate and return AdvertisementConfig (validation helpers in detail namespace)
+            template<int8_t NewTxPower>
+            using WithTxPower = typename ExitHelper::template ExitWithTxPower_Impl<NewTxPower>::type;
+
+            template<uint16_t NewMin, uint16_t NewMax>
+            using WithIntervals = typename ExitHelper::template ExitWithIntervals_Impl<NewMin, NewMax>::type;
+
+            template<auto NewAppearance>
+            using WithAppearance = typename ExitHelper::template ExitWithAppearance_Impl<NewAppearance>::type;
+        };
+
+        // Raw value mode implementation (when param_count == 1)
+        template<const auto& RawData>
+        struct RawValue {
+            // Validate it's uint8_t[]
+            using RawDataType = std::remove_reference_t<decltype(RawData)>;
+
+            static_assert(std::is_array_v<RawDataType>,
+                "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "❌  BLEX Manufacturer Data Type Error\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "\n"
+                "Raw value must be uint8_t[] type!\n"
+                "\n"
+                "✓ Correct:\n"
+                "    static constexpr uint8_t myData[] = {0x12, 0x34, ...};\n"
+                "    ::WithManufacturerData<myData>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+            using ElementType = std::remove_cv_t<std::remove_extent_t<RawDataType>>;
+
+            static_assert(std::is_same_v<ElementType, uint8_t>,
+                "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "❌  BLEX Manufacturer Data Type Error\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "\n"
+                "Array elements must be uint8_t!\n"
+                "\n"
+                "✓ Correct: uint8_t myData[] = {...}\n"
+                "✗ Invalid: uint16_t myData[] = {...}\n"
+                "✗ Invalid: int myData[] = {...}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+            // Exit methods - return AdvertisementConfig with raw data
+            template<int8_t NewTxPower>
+            using WithTxPower = AdvertisementConfig<NewTxPower, IntervalMin, IntervalMax, Appearance, RawData>;
+
+            template<uint16_t NewMin, uint16_t NewMax>
+            using WithIntervals = AdvertisementConfig<TxPower, NewMin, NewMax, Appearance, RawData>;
+
+            template<auto NewAppearance>
+            using WithAppearance = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance, RawData>;
+        };
+
+        // Mode selection based on parameter count
+        template<size_t Count, const auto&... Args>
+        struct SelectMode;
+
+        template<const auto&... Args>
+        struct SelectMode<0, Args...> {
+            using type = Builder<>;
+        };
+
+        template<const auto& FirstData>
+        struct SelectMode<1, FirstData> {
+            using type = RawValue<FirstData>;
+        };
+
+        using type = typename SelectMode<param_count, Data...>::type;
+    };
+} // namespace adv_config_detail
+
+/**
+ * @brief Compile-time advertisement configuration with fluent builder interface
+ * @tparam TxPower Transmission power in dBm (-12 to 9)
+ * @tparam IntervalMin Minimum advertising interval in ms (20 to 10240)
+ * @tparam IntervalMax Maximum advertising interval in ms (20 to 10240)
+ * @tparam Appearance BLE appearance value
+ * @tparam ManufacturerData Reference to manufacturer data uint8_t[] (auto-sized)
+ */
 template<
     int8_t TxPower = 0,
     uint16_t IntervalMin = 100,
     uint16_t IntervalMax = 150,
     auto Appearance = 0,  // 0 = BleAppearance::kUnknown (unknown device type)
-    const uint8_t* ManufacturerData = nullptr,
-    size_t ManufacturerDataLen = 0
+    const auto& ManufacturerData = blex_core::ManufacturerDataBuilder<>::data
 >
-struct AdvertisingConfig {
-    // Validate Appearance type and range FIRST (before using it)
+struct AdvertisementConfig {
+    // Validate manufacturer data type (must be uint8_t[])
+    static_assert(std::is_array_v<std::remove_reference_t<decltype(ManufacturerData)>>,
+        "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "❌  BLEX Manufacturer Data Type Error\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "\n"
+        "Manufacturer data must be uint8_t[] type!\n"
+        "\n"
+        "✓ Correct:\n"
+        "    static constexpr uint8_t myData[] = {0x12, 0x34, ...};\n"
+        "    ::WithManufacturerData<myData>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+    static_assert(std::is_same_v<std::remove_cv_t<std::remove_extent_t<std::remove_reference_t<decltype(ManufacturerData)>>>, uint8_t>,
+        "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "❌  BLEX Manufacturer Data Type Error\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "\n"
+        "Array elements must be uint8_t!\n"
+        "\n"
+        "✓ Correct: uint8_t myData[] = {...}\n"
+        "✗ Invalid: uint16_t myData[] = {...}\n"
+        "✗ Invalid: int myData[] = {...}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+    // Validate Appearance type and range
     static_assert(std::is_same_v<decltype(Appearance), blex_standard::BleAppearance> ||
                   (std::is_integral_v<decltype(Appearance)> &&
                    static_cast<uint64_t>(Appearance) <= 0xFFFF),
@@ -762,7 +1026,7 @@ struct AdvertisingConfig {
                   "Example: blex_standard::BleAppearance::kGenericSensor or 0x0540");
 
     // Marker for trait detection
-    using is_blex_advertising_config_tag = void;
+    using is_blex_advertisement_config_tag = void;
 
     // Compile-time configuration (user-specified via template parameters)
     static constexpr int8_t default_tx_power = TxPower;
@@ -770,8 +1034,10 @@ struct AdvertisingConfig {
     static constexpr uint16_t default_adv_interval_max = IntervalMax;
     static constexpr uint16_t default_appearance = static_cast<uint16_t>(Appearance);
     static constexpr uint8_t default_flags = 0x06;  // LE General Discoverable + BR/EDR Not Supported
+
+    // Manufacturer data (raw bytes, auto-sized)
     static constexpr const uint8_t* manufacturer_data = ManufacturerData;
-    static constexpr size_t manufacturer_data_len = ManufacturerDataLen;
+    static constexpr size_t manufacturer_data_len = sizeof(ManufacturerData);
 
     // ESP32-S3 TX power range (validation)
     static constexpr int8_t min_tx_power = -12;  // dBm
@@ -790,34 +1056,54 @@ struct AdvertisingConfig {
                  "Advertising interval max must be in range [20, 10240] ms");
     static_assert(IntervalMin <= IntervalMax,
                  "Advertising interval min must be <= max");
-    static_assert(ManufacturerDataLen <= 27, "Manufacturer data length must be <= 27 bytes");
+    static_assert(sizeof(ManufacturerData) <= 27,
+                 "Manufacturer data length must be <= 27 bytes");
 
     // Fluent builder methods - each returns a new type with updated config
     template<int8_t NewTxPower>
-    using WithTxPower = AdvertisingConfig<NewTxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData, ManufacturerDataLen>;
+    using WithTxPower = AdvertisementConfig<NewTxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData>;
 
     template<uint16_t NewMin, uint16_t NewMax>
-    using WithIntervals = AdvertisingConfig<TxPower, NewMin, NewMax, Appearance, ManufacturerData, ManufacturerDataLen>;
+    using WithIntervals = AdvertisementConfig<TxPower, NewMin, NewMax, Appearance, ManufacturerData>;
 
     template<auto NewAppearance>
-    using WithAppearance = AdvertisingConfig<TxPower, IntervalMin, IntervalMax, NewAppearance, ManufacturerData, ManufacturerDataLen>;
+    using WithAppearance = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance, ManufacturerData>;
 
-    // Deduce size from array reference automatically
-    // Usage: ::WithManufacturerData<mfg_data>
-    template<const auto& Data>
-    using WithManufacturerData = AdvertisingConfig<TxPower, IntervalMin, IntervalMax, Appearance, Data, sizeof(Data)>;
+    /**
+     * @brief Dual-mode manufacturer data configuration
+     * @details Supports two modes via variadic template parameter:
+     *
+     * **Mode 1: Builder (0 parameters) - Fluent chainable configuration**
+     * @code{.cpp}
+     * AdvertisementConfig<>
+     *     ::WithManufacturerData<>
+     *         ::WithManufacturerId<0x1234>
+     *         ::WithDeviceType<0x05>  // uint8_t device type
+     *     ::WithAppearance<kSensor>
+     * @endcode
+     *
+     * **Mode 2: Raw value (1 parameter) - Direct uint8_t[] injection**
+     * @code{.cpp}
+     * static constexpr uint8_t myData[] = {0x12, 0x34, ...};
+     * AdvertisementConfig<>
+     *     ::WithManufacturerData<myData>
+     *     ::WithAppearance<kSensor>
+     * @endcode
+     */
+    template<const auto&... Data>
+    using WithManufacturerData = typename adv_config_detail::WithManufacturerDataT<TxPower, IntervalMin, IntervalMax, Appearance, Data...>::type;
 };
 
 // Internal helpers for BLE unit conversions (hidden from public API)
 namespace detail {
-    // Convert milliseconds to BLE connection interval units (1.25ms per unit)
-    constexpr uint16_t ms_to_interval_units(uint16_t ms) {
+    /// @brief Convert milliseconds to BLE connection interval units (1.25ms per unit)
+    constexpr uint16_t ms_to_interval_units(uint16_t ms) noexcept {
         // ms / 1.25 = ms * 4 / 5, with rounding to the nearest
         return static_cast<uint16_t>((static_cast<uint32_t>(ms) * 4 + 2) / 5);
     }
 
-    // Convert milliseconds to BLE timeout units (10ms per unit)
-    constexpr uint16_t ms_to_timeout_units(uint16_t ms) {
+    /// @brief Convert milliseconds to BLE timeout units (10ms per unit)
+    constexpr uint16_t ms_to_timeout_units(uint16_t ms) noexcept {
         // ms / 10, with rounding to nearest
         return static_cast<uint16_t>((static_cast<uint32_t>(ms) + 5) / 10);
     }
@@ -1035,8 +1321,8 @@ struct CharacteristicCallbacks {
  * Contains no runtime state - all metadata is extracted from template parameters.
  */
 template<
-    const char* DeviceName,
     const char* ShortName,
+    const char* LongName = nullptr,
     typename Derived = void,
     typename... Args
 >
@@ -1044,11 +1330,11 @@ struct ServerBase {
     using Base = std::conditional_t<std::is_void_v<Derived>, ServerBase, Derived>;  // CRTP
 
     // Device identity
-    static constexpr const char* device_name = DeviceName;
-    static constexpr const char* short_name = ShortName;
+    static constexpr const char* device_name = ShortName;           // Short name (advertising packet)
+    static constexpr const char* device_long_name = LongName;       // Long name (scan response, optional)
 
     // Extract configurations from variadic Args
-    using AdvConfig = typename blex_core::extract_adv_config<Args...>::type;
+    using AdvConfig = blex_core::extract_adv_config<Args...>;
     using ConnConfig = typename blex_core::extract_conn_config<Args...>::type;
     using SecurityConfig = typename blex_core::extract_security_config<Args...>::type;
     using CallbacksConfig = typename blex_core::extract_server_callbacks<Args...>::type;
