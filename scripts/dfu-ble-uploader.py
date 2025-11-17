@@ -23,7 +23,7 @@ import zlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, Dict
 
 # ============== Relaunch into PlatformIO venv if present =================
 PIO_PENV = os.path.expanduser("~/.platformio/penv/bin/python")
@@ -39,11 +39,6 @@ def ensure_packages():
     except Exception:
         packages_to_install.append("bleak")
 
-    try:
-        import rich  # noqa
-    except Exception:
-        packages_to_install.append("rich")
-
     if packages_to_install:
         print(f"Installing required packages: {', '.join(packages_to_install)}...", flush=True)
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q"] + packages_to_install)
@@ -51,43 +46,14 @@ def ensure_packages():
     # Final imports to expose names
     try:
         from bleak import BleakClient, BleakScanner, BleakError
-        from rich.console import Console
-        from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TransferSpeedColumn
-        from rich.live import Live
-        from rich.layout import Layout
-        from rich.text import Text
     except Exception as e:
         print(f"Failed to import required packages: {e}", flush=True)
         raise
 
 ensure_packages()
 
-# import argparse
-# import asyncio
-# import logging
-# import os
-# import sys
-# import zlib
-# from dataclasses import dataclass
-# from pathlib import Path
-# from typing import Optional, Tuple, Dict, Any, Callable
-
-# Third-party imports are intentionally at top-level so missing deps fail fast.
-try:
-    from bleak import BleakClient, BleakScanner, BleakError  # type: ignore
-except Exception as exc:  # pragma: no cover - runtime environment
-    print("Missing dependency: 'bleak'. Install with: pip install bleak", file=sys.stderr)
-    raise
-
-try:
-    from rich.console import Console
-    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TransferSpeedColumn
-    from rich.live import Live
-    from rich.text import Text
-    from rich.panel import Panel
-except Exception as exc:  # pragma: no cover - runtime environment
-    print("Missing dependency: 'rich'. Install with: pip install rich", file=sys.stderr)
-    raise
+# Import bleak after ensuring it's installed
+from bleak import BleakClient, BleakScanner, BleakError  # type: ignore
 
 # -----------------------------
 # Constants and protocol values
@@ -129,22 +95,19 @@ EXIT_INTERRUPTED = 130  # Standard exit code for SIGINT (128 + 2)
 # -----------------------------
 class DFUError(RuntimeError):
     """Base class for DFU-related errors."""
-
+    exit_code = EXIT_GENERIC_ERROR
 
 class DeviceNotFound(DFUError):
-    pass
-
+    exit_code = EXIT_DEVICE_NOT_FOUND
 
 class ConnectionFailed(DFUError):
-    pass
-
+    exit_code = EXIT_CONNECTION_FAILED
 
 class VerificationFailed(DFUError):
-    pass
-
+    exit_code = EXIT_VERIFICATION_FAILED
 
 class ConnectionLost(DFUError):
-    pass
+    exit_code = EXIT_CONNECTION_LOST
 
 
 # -----------------------------
@@ -156,53 +119,16 @@ class IndentLogger:
         self._logger = logger
         self._indent = 0
 
-    def indent(self):
-        self._indent += 1
-
-    def dedent(self):
-        self._indent = max(0, self._indent - 1)
-
     def _log(self, level, msg, *args, **kwargs):
         indent_str = "  " * self._indent
         self._logger.log(level, indent_str + msg, *args, **kwargs)
 
-    def debug(self, msg, *args, **kwargs):
-        self._log(logging.DEBUG, msg, *args, **kwargs)
-
-    def info(self, msg, *args, **kwargs):
-        self._log(logging.INFO, msg, *args, **kwargs)
-
-    def warning(self, msg, *args, **kwargs):
-        self._log(logging.WARNING, msg, *args, **kwargs)
-
-    def error(self, msg, *args, **kwargs):
-        self._log(logging.ERROR, msg, *args, **kwargs)
-
-
-def configure_logging(level: int = logging.WARNING) -> None:
-    """Call early to configure logging for CLI usage."""
-    fmt = "%(asctime)s %(levelname)s [%(name)s] %(message)s" if level <= logging.DEBUG else "%(levelname)s: %(message)s"
-    # Set root logger to WARNING to silence all third-party libraries
-    # Use stderr to avoid interfering with the Rich console on stdout
-    logging.basicConfig(level=logging.WARNING, format=fmt, stream=sys.stderr)
-    # Only enable our own loggers at the requested level
-    logging.getLogger("DFUUploader").setLevel(level)
-    logging.getLogger("dfu_cli").setLevel(level)
-
-
-def parse_response_packet(data: bytes) -> Optional[Tuple[int, int, bytes]]:
-    """
-    Parse an incoming control notification into (req_opcode, status, payload).
-    Returns None if not a DFU response packet.
-    """
-    if not data or len(data) < 3:
-        return None
-    if data[0] != OP_RESPONSE:
-        return None
-    req_opcode = data[1]
-    status = data[2]
-    payload = data[3:] if len(data) > 3 else b""
-    return req_opcode, status, payload
+    def indent(self): self._indent += 1
+    def dedent(self): self._indent = max(0, self._indent - 1)
+    def debug(self, msg, *args, **kwargs): self._log(logging.DEBUG, msg, *args, **kwargs)
+    def info(self, msg, *args, **kwargs): self._log(logging.INFO, msg, *args, **kwargs)
+    def warning(self, msg, *args, **kwargs): self._log(logging.WARNING, msg, *args, **kwargs)
+    def error(self, msg, *args, **kwargs): self._log(logging.ERROR, msg, *args, **kwargs)
 
 
 # -----------------------------
@@ -228,22 +154,15 @@ class DFUCommand:
         return False  # Default: re-raise all errors
 
     async def post_execute(self, uploader: "DFUUploader") -> None:
-        """
-        Called after successful command execution (after response received).
-        Subclasses can override to add verification steps.
-
-        Args:
-            uploader: The DFUUploader instance
-        """
-        pass  # Default: no post-execution steps
+        """Called after successful command execution for verification."""
+        pass
 
     async def execute(self, uploader: "DFUUploader") -> Optional[Any]:
-        """
-        Execute the command using the uploader. Subclasses implement `build()` and `parse_response()`.
-        """
+        """Execute the command using the uploader."""
         payload = self.build()
         uploader.logger.debug("→ Sending %s command...", self.name)
         uploader.logger.indent()
+        waiter_task = None
         try:
             uploader.logger.debug("Waiting for %s response...", self.name)
             waiter_task = asyncio.create_task(uploader.waiter.wait_response(self.opcode, timeout=self.timeout))
@@ -255,22 +174,22 @@ class DFUCommand:
 
             result = self.parse_response(resp_payload)
             uploader.logger.debug("Received %s response: status=0x%02X", self.name, status)
-
-            # Template method hook for post-execution verification
             await self.post_execute(uploader)
-
             return result
         except asyncio.CancelledError:
-            # Always propagate cancellation immediately (Ctrl+C, task.cancel(), etc.)
             raise
         except Exception as e:
-            # Give subclass a chance to handle the error
             if self.on_error(e):
-                # Error was suppressed - still run post_execute verification
                 await self.post_execute(uploader)
                 return None
-            raise  # Re-raise if not handled
+            raise
         finally:
+            if waiter_task and not waiter_task.done():
+                waiter_task.cancel()
+                try:
+                    await waiter_task
+                except (asyncio.CancelledError, ConnectionLost):
+                    pass
             uploader.logger.dedent()
 
     def build(self) -> bytes:
@@ -325,6 +244,11 @@ class CreateObject(DFUCommand):
     def build(self) -> bytes:
         return bytes([self.opcode, self.obj_type]) + int(self.size).to_bytes(4, "little")
 
+    async def execute(self, uploader: "DFUUploader") -> Optional[Any]:
+        """Execute the flash erase operation."""
+        print(f"Erasing flash ({self.size:,} bytes)...", flush=True)
+        return await super().execute(uploader)
+
 
 @dataclass
 class CalculateCRC(DFUCommand):
@@ -352,18 +276,89 @@ class ExecuteObject(DFUCommand):
 
     def on_error(self, error: Exception) -> bool:
         """Device may disconnect during GATT write before we get DFU response - this is OK."""
-        if isinstance(error, (asyncio.TimeoutError, BleakError)):
+        if isinstance(error, (asyncio.TimeoutError, BleakError, ConnectionLost)):
             return True  # Suppress - device is rebooting, verification happens in post_execute
         return False
 
+    async def execute(self, uploader: "DFUUploader") -> Optional[Any]:
+        """Execute firmware activation."""
+        print("Activating firmware...", flush=True)
+        result = await super().execute(uploader)
+        return result
+
     async def post_execute(self, uploader: "DFUUploader") -> None:
         """REQUIRE device reboot - fail if device doesn't disconnect."""
+        print("✓ Firmware activated successfully, waiting for device to reboot...", flush=True)
         uploader.logger.debug("Waiting for device reboot (disconnect required)...")
         try:
-            await asyncio.wait_for(uploader.disconnect_event.wait(), timeout=5.0)
+            await asyncio.wait_for(uploader.disconnect_event.wait(), timeout=CONNECTION_REBOOT_TIMEOUT_S)
             uploader.logger.debug("Device rebooted successfully")
+            print("✓ Device rebooted successfully", flush=True)
         except asyncio.TimeoutError:
             raise DFUError(f"{self.name}: Device did NOT reboot after execute - FAILURE!")
+
+
+class UploadData(DFUCommand):
+    """
+    Uploads firmware data packets to the device.
+    Uses PRN (Packet Receipt Notification) for progress verification.
+    """
+
+    def __init__(self, firmware: bytes, resume_offset: int = 0):
+        super().__init__(opcode=0, name="UploadData")  # No opcode used - direct data writes
+        self.firmware = firmware
+        self.resume_offset = resume_offset
+        self.total = len(firmware)
+
+    def build(self) -> bytes:
+        """No command packet - this uses write_packet() directly."""
+        raise NotImplementedError("UploadData doesn't use build()")
+
+    def parse_response(self, payload: bytes) -> Any:
+        """No response parsing - PRN notifications handled separately."""
+        raise NotImplementedError("UploadData doesn't use parse_response()")
+
+    async def execute(self, uploader: "DFUUploader") -> Optional[Any]:
+        """Execute firmware upload."""
+        uploader.logger.debug("→ Starting firmware upload...")
+        uploader.logger.indent()
+
+        try:
+            offset = self.resume_offset
+            packets = offset // uploader.chunk_size
+            prn_future = uploader.waiter.register_prn()
+
+            # Upload loop
+            while offset < self.total:
+                chunk = self.firmware[offset: offset + uploader.chunk_size]
+                await uploader.write_packet(chunk)
+                offset += len(chunk)
+                packets += 1
+
+                # Soft yield to avoid BLE buffer overload
+                if packets % 16 == 0:
+                    await asyncio.sleep(0.01)
+
+                # PRN handling
+                if packets % uploader.prn == 0:
+                    prn_off, prn_crc = await uploader.waiter.wait_prn(prn_future, timeout=12.0)
+                    local_crc = zlib.crc32(self.firmware[:prn_off]) & 0xFFFFFFFF
+                    if local_crc != prn_crc:
+                        raise VerificationFailed(
+                            f"PRN CRC mismatch at {prn_off}: "
+                            f"device=0x{prn_crc:08X} local=0x{local_crc:08X}"
+                        )
+
+                    # Print CRC verification
+                    pct = (prn_off * 100) // self.total
+                    print(f"  CRC ok @ {prn_off:,} bytes ({pct}%)", flush=True)
+                    prn_future = uploader.waiter.register_prn()
+
+            uploader.logger.debug("✓ Firmware upload complete")
+            return None
+
+        finally:
+            uploader.logger.dedent()
 
 
 # -----------------------------
@@ -380,19 +375,33 @@ class ControlWaiter:
         self._prn_future: Optional[asyncio.Future] = None
         self._lock = asyncio.Lock()
 
+    def _parse_response_packet(self, data: bytes) -> Optional[Tuple[int, int, bytes]]:
+        """
+        Parse an incoming control notification into (req_opcode, status, payload).
+        Returns None if not a DFU response packet.
+        """
+        if not data or len(data) < 3:
+            return None
+        if data[0] != OP_RESPONSE:
+            return None
+        req_opcode = data[1]
+        status = data[2]
+        payload = data[3:] if len(data) > 3 else b""
+        return req_opcode, status, payload
+
     def notification_handler(self, sender: Any, data: bytes) -> None:
         """
         Handle BLE notifications from control characteristic.
         Notifications can be:
         1. Standard response packets (60 <opcode> <status> <payload>)
-        2. Raw 8-byte so called Raw PRN notifications (offset + CRC, no opcode wrapper)
+        2. Raw 8-byte so-called Raw PRN notifications (offset + CRC, no opcode wrapper)
         """
         # Notification logs are not indented - temporarily reset indent
         saved_indent = self._logger._indent
         self._logger._indent = 0
         try:
             self._logger.debug("RAW notification: len=%d data=%s", len(data), data.hex())
-            parsed = parse_response_packet(data)
+            parsed = self._parse_response_packet(data)
             if parsed:
                 req_opcode, status, payload = parsed
                 self._logger.debug("Parsed: opcode=0x%02X status=0x%02X payload_len=%d", req_opcode, status, len(payload))
@@ -502,12 +511,6 @@ class DFUUploader:
         self.logger = IndentLogger(logging.getLogger(self.__class__.__name__))
         self.waiter = ControlWaiter(self.logger)
         self.disconnect_event = asyncio.Event()
-        self.console = Console()
-        self.detail_lines: list[str] = []
-        self.stdin_fd = None
-        self.old_tty_settings = None
-        # Interactive mode: progress bar with details toggle (disabled in debug mode or non-TTY)
-        self.interactive_mode = self.logger._logger.level > logging.DEBUG and self._is_tty()
 
     # -------------------------
     # Low-level BLE helpers
@@ -536,28 +539,13 @@ class DFUUploader:
             raise DeviceNotFound(f"Device named '{self.device_name}' advertising DFU service not found")
         return dfu_device
 
-    async def connect(self, device: Any, max_retries: int = MAX_CONNECTION_RETRIES) -> None:
-        last_exc: Optional[Exception] = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                self.logger.debug("Connecting attempt %d to %s", attempt, device.address)
-                self.client = BleakClient(device.address, disconnected_callback=self._on_disconnect)
-                await self.client.connect()
-                await self.client.start_notify(self.ctrl_uuid, self.waiter.notification_handler)
-                await asyncio.sleep(0.5)  # let subscription settle
-                self.console.print(f"Connected to {getattr(device, 'name', device.address)} ({device.address})")
-                return
-            except Exception as exc:
-                last_exc = exc
-                self.logger.warning("Connect attempt %d failed: %s", attempt, exc)
-                await asyncio.sleep(2 ** (attempt - 1))
-                if self.client:
-                    try:
-                        await self.client.disconnect()
-                    except Exception:
-                        pass
-                    self.client = None
-        raise ConnectionFailed(f"Failed to connect to {getattr(device, 'address', device)} after {max_retries} attempts: {last_exc!r}")
+    async def connect(self, device: Any) -> None:
+        """Single connection attempt without retry logic."""
+        self.logger.debug("Connecting to %s", device.address)
+        self.client = BleakClient(device.address, disconnected_callback=self._on_disconnect)
+        await self.client.connect()
+        await self.client.start_notify(self.ctrl_uuid, self.waiter.notification_handler)
+        await asyncio.sleep(0.5)  # let subscription settle
 
     async def disconnect(self) -> None:
         if self.client:
@@ -587,17 +575,18 @@ class DFUUploader:
     async def write_control(self, payload: bytes, with_response: bool = True) -> None:
         if not self.client:
             raise ConnectionFailed("Not connected")
-        await self.client.write_gatt_char(self.ctrl_uuid, payload, response=with_response)
+        try:
+            await self.client.write_gatt_char(self.ctrl_uuid, payload, response=with_response)
+        except BleakError as e:
+            raise ConnectionLost(f"Device disconnected during control write: {e}")
 
     async def write_packet(self, data: bytes) -> None:
         if not self.client:
             raise ConnectionFailed("Not connected")
-        await self.client.write_gatt_char(self.data_uuid, data, response=False)
-
-    def _add_detail(self, text: str) -> None:
-        self.detail_lines.append(text)
-        if len(self.detail_lines) > 50:
-            self.detail_lines.pop(0)
+        try:
+            await self.client.write_gatt_char(self.data_uuid, data, response=False)
+        except BleakError as e:
+            raise ConnectionLost(f"Device disconnected during data write: {e}")
 
     def _is_tty(self) -> bool:
         return sys.stdin.isatty()
@@ -610,49 +599,6 @@ class DFUUploader:
             return f"{cleaned[0:8]}-{cleaned[8:12]}-{cleaned[12:16]}-{cleaned[16:20]}-{cleaned[20:32]}"
         return addr
 
-    def _setup_stdin_reader(self, loop: asyncio.AbstractEventLoop, details_expanded_ref: list) -> None:
-        """Setup non-blocking stdin reader for 'o' key detection in interactive mode.
-
-        Args:
-            loop: Event loop to register the reader with
-            details_expanded_ref: Single-element list containing the details_expanded flag
-        """
-        import termios
-        import tty
-
-        try:
-            self.stdin_fd = sys.stdin.fileno()
-            self.old_tty_settings = termios.tcgetattr(self.stdin_fd)
-            tty.setcbreak(self.stdin_fd)
-            loop.add_reader(self.stdin_fd, lambda: self._handle_stdin_input(details_expanded_ref))
-        except Exception as e:
-            self.logger.debug("Failed to setup stdin reader: %s", e)
-
-    def _handle_stdin_input(self, details_expanded_ref: list) -> None:
-        """Handle stdin input - called by asyncio when data is available.
-
-        Args:
-            details_expanded_ref: Single-element list containing the details_expanded flag
-        """
-        try:
-            ch = sys.stdin.read(1)
-            if ch.lower() == 'o':
-                details_expanded_ref[0] = not details_expanded_ref[0]
-        except Exception:
-            pass
-
-    def _cleanup_stdin(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Restore terminal settings after interactive mode."""
-        import termios
-
-        try:
-            if self.stdin_fd is not None:
-                loop.remove_reader(self.stdin_fd)
-                if self.old_tty_settings is not None:
-                    termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.old_tty_settings)
-        except Exception:
-            pass
-
     # -------------------------
     # DFU high-level ops
     # -------------------------
@@ -663,7 +609,6 @@ class DFUUploader:
         return await SelectObject(obj_type).execute(self)
 
     async def create_object(self, obj_type: int, size: int) -> None:
-        self._add_detail(f"create object: type={obj_type} size={size}")
         await CreateObject(obj_type, size).execute(self)
 
     async def calculate_crc(self):
@@ -686,7 +631,7 @@ class DFUUploader:
         if total > MAX_FIRMWARE_SIZE:
             raise DFUError(f"Firmware too large: {total} bytes (max {MAX_FIRMWARE_SIZE})")
 
-        self.console.print(f"Starting BLE DFU upload: {total:,} bytes, CRC32=0x{zlib.crc32(firmware)&0xFFFFFFFF:08X}")
+        print(f"Starting BLE DFU upload: {total:,} bytes, CRC32=0x{zlib.crc32(firmware)&0xFFFFFFFF:08X}", flush=True)
 
         # Determine device
         if self.device_address:
@@ -700,14 +645,31 @@ class DFUUploader:
         else:
             device = await self.scan_for_device(timeout=10)
 
-        # Connect with spinner in interactive mode
-        if self.interactive_mode:
-            from rich.status import Status
-            with Status(f"Connecting to {device.address}...", console=self.console, spinner="dots"):
-                await self.connect(device)
-            self.console.print(f"✓ Connected to {getattr(device, 'name', device.address)} ({device.address})", style="green")
-        else:
-            await self.connect(device)
+        # Connect only if not already connected (with retry logic)
+        if not (self.client and self.client.is_connected):
+            last_exc: Optional[Exception] = None
+            for attempt in range(1, MAX_CONNECTION_RETRIES + 1):
+                try:
+                    print(f"Connecting to {device.address}...", flush=True)
+                    await self.connect(device)
+                    print(f"✓ Connected to {getattr(device, 'name', device.address)} ({device.address})", flush=True)
+                    break  # Success - exit retry loop
+                except Exception as exc:
+                    last_exc = exc
+                    print(f"WARNING: Connect attempt {attempt} failed: {exc}", flush=True)
+
+                    if attempt < MAX_CONNECTION_RETRIES:
+                        await asyncio.sleep(2 ** (attempt - 1))
+                        # Cleanup before retry
+                        if self.client:
+                            try:
+                                await self.client.disconnect()
+                            except Exception:
+                                pass
+                            self.client = None
+                    else:
+                        # Final attempt failed
+                        raise ConnectionFailed(f"Failed to connect after {MAX_CONNECTION_RETRIES} attempts: {last_exc!r}")
 
         try:
             # Set PRN
@@ -722,144 +684,38 @@ class DFUUploader:
             if dev_offset > 0:
                 local_crc = zlib.crc32(firmware[:dev_offset]) & 0xFFFFFFFF
                 if dev_offset == total and local_crc == dev_crc:
-                    self.console.print(f"Firmware already uploaded: {total:,} bytes, CRC=0x{local_crc:08X}")
-                    self.console.print("Activating firmware on device...")
+                    print(f"Firmware already uploaded: {total:,} bytes, CRC=0x{local_crc:08X}", flush=True)
+                    print("Activating firmware on device...", flush=True)
                     await self.execute_object()
-                    self.console.print("Firmware activated successfully — device rebooted")
+                    print("✓ Firmware activated successfully — device rebooted", flush=True)
                     return
                 if local_crc == dev_crc:
                     resume_offset = dev_offset
-                    self.console.print(f"Resuming upload from {resume_offset} bytes")
+                    print(f"Resuming upload from {resume_offset:,} bytes", flush=True)
                 else:
-                    self.console.print("Device partial data CRC mismatch — restarting upload")
+                    print("Device partial data CRC mismatch — restarting upload", flush=True)
 
             # Create object if starting fresh (can take ~25s for flash erase)
             if resume_offset == 0:
-                if self.interactive_mode:
-                    from rich.status import Status
-                    with Status("Preparing for firmware upload...", console=self.console, spinner="dots"):
-                        await self.create_object(obj_type, total)
-                else:
-                    await self.create_object(obj_type, total)
+                await CreateObject(obj_type, total).execute(self)
 
-            # Setup stdin reader for interactive mode (only with progress bar)
-            loop = asyncio.get_running_loop()
-            details_expanded_ref = [False]  # Mutable reference for stdin handler
-            if self.interactive_mode:
-                self._setup_stdin_reader(loop, details_expanded_ref)
-
-            try:
-                if self.interactive_mode:
-                    # Interactive mode with rich progress bar
-                    from rich.console import Group
-
-                    progress = Progress(
-                        TextColumn("[progress.description]{task.description}"),
-                        BarColumn(),
-                        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                        TextColumn("{task.completed}/{task.total} bytes"),
-                        TransferSpeedColumn(),
-                        TimeRemainingColumn(),
-                        console=self.console,
-                    )
-                    task = progress.add_task("Uploading", total=total, completed=resume_offset)
-                    hint_details_visible_ref = [True]  # Mutable reference for exception handler
-
-                    def build_display():
-                        """Build display with a progress bar and optional details."""
-                        elements = [progress]
-                        if details_expanded_ref[0] and self.detail_lines:
-                            elements.append(Text("\nDetails (press 'o' to hide):"))
-                            for line in self.detail_lines:
-                                elements.append(Text(f"  {line}"))
-                        elif hint_details_visible_ref[0]:
-                            elements.append(Text("\nPress 'o' to show details"))
-                        return Group(*elements)
-
-                    live = Live(build_display(), console=self.console, refresh_per_second=4)
-                    live.start()
-                    try:
-                        offset = resume_offset
-                        packets = offset // self.chunk_size
-                        prn_future = self.waiter.register_prn()
-
-                        while offset < total:
-                            chunk = firmware[offset: offset + self.chunk_size]
-                            await self.write_packet(chunk)
-                            offset += len(chunk)
-                            packets += 1
-
-                            progress.update(task, completed=offset)
-                            live.update(build_display())
-
-                            # Soft yield to avoid BLE buffer overload
-                            if packets % 16 == 0:
-                                await asyncio.sleep(0.01)
-
-                            # PRN handling
-                            if packets % self.prn == 0:
-                                prn_off, prn_crc = await self.waiter.wait_prn(prn_future, timeout=12.0)
-                                local_crc = zlib.crc32(firmware[:prn_off]) & 0xFFFFFFFF
-                                if local_crc != prn_crc:
-                                    raise VerificationFailed(f"PRN CRC mismatch at {prn_off}: device=0x{prn_crc:08X} local=0x{local_crc:08X}")
-                                self._add_detail(f"CRC ok @ {prn_off}")
-                                live.update(build_display())
-                                prn_future = self.waiter.register_prn()
-
-                        # Upload complete - hide the help text
-                        hint_details_visible_ref[0] = False
-                        live.update(build_display())
-                    except (Exception, KeyboardInterrupt):
-                        # Clean up display before exception propagates
-                        hint_details_visible_ref[0] = False
-                        live.update(build_display())
-                        raise
-                    finally:
-                        live.stop()
-
-                else:
-                    # Non-interactive mode - just log progress
-                    offset = resume_offset
-                    packets = offset // self.chunk_size
-                    prn_future = self.waiter.register_prn()
-
-                    while offset < total:
-                        chunk = firmware[offset: offset + self.chunk_size]
-                        await self.write_packet(chunk)
-                        offset += len(chunk)
-                        packets += 1
-
-                        # Soft yield to avoid BLE buffer overload
-                        if packets % 16 == 0:
-                            await asyncio.sleep(0.01)
-
-                        # PRN handling
-                        if packets % self.prn == 0:
-                            prn_off, prn_crc = await self.waiter.wait_prn(prn_future, timeout=12.0)
-                            local_crc = zlib.crc32(firmware[:prn_off]) & 0xFFFFFFFF
-                            if local_crc != prn_crc:
-                                raise VerificationFailed(f"PRN CRC mismatch at {prn_off}: device=0x{prn_crc:08X} local=0x{local_crc:08X}")
-                            self.logger.info("Progress: %d/%d bytes (%.1f%%)", prn_off, total, 100.0 * prn_off / total)
-                            prn_future = self.waiter.register_prn()
-            finally:
-                # Clean up the stdin reader if we set it up
-                if self.interactive_mode:
-                    self._cleanup_stdin(loop)
+            # Upload firmware data
+            await UploadData(firmware, resume_offset).execute(self)
 
             # Final CRC verification
-            calc_off, calc_crc = await self.calculate_crc()
+            calc_off, calc_crc = await CalculateCRC().execute(self)
             local_crc = zlib.crc32(firmware[:calc_off]) & 0xFFFFFFFF
             if calc_off != total or calc_crc != local_crc:
                 raise VerificationFailed(
                     f"Verification failed: device_off={calc_off} device_crc=0x{calc_crc:08X} local_crc=0x{local_crc:08X}"
                 )
 
-            self.console.print(f"Upload complete: {calc_off} bytes, CRC=0x{calc_crc:08X}")
+            print(f"✓ Upload complete: {calc_off:,} bytes, CRC=0x{calc_crc:08X}", flush=True)
 
             # Execute firmware (verifies reboot internally)
-            await self.execute_object()
+            await ExecuteObject().execute(self)
 
-            self.console.print("Firmware successfully activated — device rebooted")
+            print("✓ Firmware successfully activated — device rebooted", flush=True)
 
         finally:
             # Always try to disconnect / cleanup
@@ -870,7 +726,7 @@ class DFUUploader:
 
     # BLE callback
     def _on_disconnect(self, client):
-        # Get the event loop (this callback may be called from BLE thread)
+        # Get the event loop (this callback may be called from the BLE thread)
         try:
             loop = asyncio.get_running_loop()
             # Thread-safe: schedule disconnect_event.set() and fail pending futures
@@ -922,7 +778,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if log_idx + 1 < len(argv):
                         typo = argv[log_idx + 1].lower()
                         valid = ["debug", "info", "warning", "error"]
-                        # Simple fuzzy match: check first two chars
+                        # Simple fuzzy match: check the first two chars
                         if len(typo) >= 2:
                             suggestions = [v for v in valid if v.startswith(typo[:2])]
                             if suggestions:
@@ -933,7 +789,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Logging
     log_level = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING, "error": logging.ERROR}[args.log_level]
-    configure_logging(level=log_level)
+
+    # Configure logging: call early to configure logging for CLI usage."""
+    fmt = "%(asctime)s %(levelname)s [%(name)s] %(message)s" if log_level <= logging.DEBUG else "%(levelname)s: %(message)s"
+    logging.basicConfig(level=logging.WARNING, format=fmt, stream=sys.stdout)
+    logging.getLogger("DFUUploader").setLevel(log_level)
+    logging.getLogger("dfu_cli").setLevel(log_level)
     logger = logging.getLogger("dfu_cli")
 
     device_address = args.device or os.environ.get("BLE_DEVICE_ADDRESS")
@@ -964,18 +825,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         asyncio.run(uploader.upload())
         return EXIT_SUCCESS
-    except DeviceNotFound as e:
-        logger.error("Device not found: %s", e)
-        return EXIT_DEVICE_NOT_FOUND
-    except VerificationFailed as e:
-        logger.error("Verification failed: %s", e)
-        return EXIT_VERIFICATION_FAILED
-    except ConnectionFailed as e:
-        logger.error("Connection failed: %s", e)
-        return EXIT_CONNECTION_FAILED
-    except ConnectionLost as e:
-        logger.error("Connection lost: %s", e)
-        return EXIT_CONNECTION_LOST
+    except DFUError as e:
+        logger.error("%s", e)
+        return e.exit_code
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.error("Interrupted by user")
         return EXIT_INTERRUPTED
