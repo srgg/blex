@@ -118,6 +118,7 @@ struct Descriptor : DescriptorBase<T, UUID, Perms, MaxSize> {
 template<typename T, auto UUID, T Value, typename Perms = Permissions<>::AllowRead>
 struct ConstDescriptor : DescriptorBase<T, UUID, Perms, blex_core::value_storage_size_v<T, Value>> {
     static constexpr T value = Value;
+    static constexpr bool is_const_descriptor = true;
 
     static_assert(Perms::canRead &&
                   !Perms::canWrite &&

@@ -508,12 +508,12 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
 
 private:
     /**
-     * @brief Helper to register all descriptors (unwraps final types to Base for backend lookup)
+     * @brief Helper to register all descriptors (passes full descriptor types for proper backend specialization)
      */
     template<typename... Descriptors>
     static void register_all_descriptors([[maybe_unused]] NimBLECharacteristic* pC, blex_core::DescriptorsPack<Descriptors...>) {
         if constexpr (sizeof...(Descriptors) > 0) {
-            (DescriptorBackend<typename Descriptors::Base>::register_to_char(pC), ...);
+            (DescriptorBackend<Descriptors>::register_to_char(pC), ...);
         }
     }
 };
@@ -525,23 +525,74 @@ private:
 #ifdef BLEX_NIMBLE_AVAILABLE
 
 /**
- * @brief NimBLE backend for generic DescriptorBase (handles both dynamic and const descriptors)
+ * @brief NimBLE backend for descriptors (handles both const and dynamic descriptors)
+ * @details Checks is_const_descriptor flag and is_presentation_format_descriptor marker
  */
-template<typename T, auto UUID, typename Perms, size_t MaxSize>
-struct DescriptorBackend<DescriptorBase<T, UUID, Perms, MaxSize>> {
-    using Base = DescriptorBase<T, UUID, Perms, MaxSize>;
+template<typename Desc>
+struct DescriptorBackend {
+private:
+    // Check if descriptor has is_const_descriptor flag (SFINAE fallback for types without the flag)
+    template<typename D>
+    static constexpr auto check_const_flag(int) -> decltype(D::is_const_descriptor) {
+        return D::is_const_descriptor;
+    }
 
+    template<typename D>
+    static constexpr bool check_const_flag(...) {
+        return false;
+    }
+
+    // Check if descriptor has is_presentation_format_descriptor marker (SFINAE fallback)
+    template<typename D>
+    static constexpr auto check_presentation_format(int) -> decltype(typename D::is_presentation_format_descriptor{}, std::true_type{}) {
+        return std::true_type{};
+    }
+
+    template<typename D>
+    static constexpr std::false_type check_presentation_format(...) {
+        return std::false_type{};
+    }
+
+    static constexpr bool is_const_descriptor = check_const_flag<Desc>(0);
+    static constexpr bool is_presentation_format = decltype(check_presentation_format<Desc>(0))::value;
+
+public:
     static NimBLEDescriptor* register_to_char(NimBLECharacteristic* pChar) {
-        NimBLEDescriptor* desc = pChar->createDescriptor(
-            blex_nimble::make_uuid<UUID>(),
-            (Perms::canRead ? NIMBLE_PROPERTY::READ : 0) | (Perms::canWrite ? NIMBLE_PROPERTY::WRITE : 0),
-            MaxSize);
-        return desc;
+        // Delegate to Base specialization for presentation format descriptors
+        if constexpr (is_presentation_format) {
+            using Base = typename Desc::Base;
+            return DescriptorBackend<Base>::register_to_char(pChar);
+        } else {
+            // Generic descriptor handling
+            using Base = typename Desc::Base;
+
+            NimBLEDescriptor* desc = pChar->createDescriptor(
+                blex_nimble::make_uuid<Base::uuid>(),
+                (Base::perms_type::canRead ? NIMBLE_PROPERTY::READ : 0) |
+                (Base::perms_type::canWrite ? NIMBLE_PROPERTY::WRITE : 0),
+                Base::max_size);
+
+            // Set value for const descriptors (checked via is_const_descriptor flag)
+            if constexpr (is_const_descriptor) {
+                if (desc) {
+                    using T = typename Base::value_type;
+                    if constexpr (std::is_same_v<T, const char*>) {
+                        desc->setValue(std::string(Desc::value));
+                    } else if constexpr (std::is_same_v<T, std::string>) {
+                        desc->setValue(Desc::value);
+                    } else {
+                        desc->setValue(reinterpret_cast<const uint8_t*>(&Desc::value), sizeof(T));
+                    }
+                }
+            }
+            return desc;
+        }
     }
 };
 
 /**
- * @brief NimBLE backend for PresentationFormatDescriptor
+ * @brief NimBLE backend for PresentationFormatDescriptorBase
+ * @details Handles both Base and derived PresentationFormatDescriptor types via trait detection
  */
 template<uint8_t Format, int8_t Exponent, uint16_t Unit, uint8_t Namespace, uint16_t Description>
 struct DescriptorBackend<PresentationFormatDescriptorBase<Format, Exponent, Unit, Namespace, Description>> {

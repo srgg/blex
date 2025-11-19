@@ -7,7 +7,7 @@
  * - Advertising configuration (TX power, intervals, appearance, manufacturer data)
  * - Connection configuration (MTU, intervals)
  * - Server callbacks (connect, disconnect)
- * - Standard BLE characteristics (temperature, LED control)
+ * - Standard BLE characteristics (temperature with user description descriptor)
  * - Device Information Service
  */
 
@@ -59,14 +59,24 @@ static void onDisconnect(const NimBLEConnInfo& conn, const int reason) {
 inline constexpr char deviceName[] = "BlexBasic";
 inline constexpr char deviceNameLong[] = "Blex Basic Peripheral";
 
+/// User Description text for temperature characteristic
+static constexpr char TEMP_DESC_TEXT[] = "Ambient temperature sensor reading in Celsius";
+
 using MyBlex = blexDefault;
 
 /// Temperature characteristic (standard BLE UUID 0x2A6E)
+/// Includes UserDescription and PresentationFormat descriptors
 using TempChar = MyBlex::Characteristic<
     float,
     0x2A6E,
     MyBlex::Permissions<>::AllowRead::AllowNotify,
-    MyBlex::CharacteristicCallbacks<>::WithOnRead<onTemperatureRead>
+    MyBlex::CharacteristicCallbacks<>::WithOnRead<onTemperatureRead>,
+    blex_standard::descriptors::UserDescription<TEMP_DESC_TEXT>,
+    blex_standard::descriptors::PresentationFormat<
+        MyBlex::GattFormat::kFloat32,       // IEEE-754 32-bit float
+        0,                                   // Exponent: 10^0 (no scaling)
+        MyBlex::GattUnit::kDegreeCelsius    // Unit: °C (Namespace and Description use defaults)
+    >
 >;
 
 /// Environmental Sensing Service (standard BLE UUID 0x181A)
