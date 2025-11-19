@@ -262,7 +262,7 @@ git_revision = get_git_revision()
 board_name = env.get("BOARD", "unknown")
 
 # Store cache in PlatformIO's build directory (per-environment)
-cache_file = Path(env.get("BUILD_DIR")) / "device_macs.json"
+cache_file = Path(env.subst("$BUILD_DIR")) / "device_macs.json"
 cache_file.parent.mkdir(parents=True, exist_ok=True)  # Ensure the build directory exists
 
 # Try to load from the cache file first
