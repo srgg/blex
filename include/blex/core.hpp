@@ -234,7 +234,7 @@ enum BleIOCapability : uint8_t {
 };
 
 // Forward declarations for config templates (needed by extract helpers)
-template<int8_t, uint16_t, uint16_t, auto, const auto&>
+template<int8_t, uint16_t, uint16_t, auto, const auto&, const char*>
 struct AdvertisementConfig;
 
 template<uint16_t, uint16_t, uint16_t, uint16_t, uint16_t>
@@ -389,14 +389,21 @@ using unwrap_adv_config = typename unwrap_adv_config_impl<T>::type;
 
 /// @brief Extract AdvertisementConfig from variadic args, or void if not provided
 /// @details Automatically unwraps Builder::type to final AdvertisementConfig
-template<typename... Args>
-using extract_adv_config = unwrap_adv_config<
-    typename extract_first_matching<
-        is_advertisement_pred,
-        void,
-        Args...
-    >::type
->;
+template<typename...>
+struct extract_adv_config {
+    using type = void;
+};
+
+template<typename First, typename... Rest>
+struct extract_adv_config<First, Rest...> {
+    using type = unwrap_adv_config<
+        std::conditional_t<
+            AdvertisementConfigType<First>,
+            First,
+            typename extract_adv_config<Rest...>::type
+        >
+    >;
+};
 
 /// @brief Extract ConnectionConfig from variadic args, or void if not provided
 template<typename... Args>
@@ -787,6 +794,7 @@ namespace adv_config_detail {
         uint16_t IntervalMin,
         uint16_t IntervalMax,
         auto Appearance,
+        const char* LongName,
         uint16_t ManufacturerId,
         bool ManufacturerIdSet,
         uint8_t... TLVBytes
@@ -829,21 +837,21 @@ namespace adv_config_detail {
         struct ExitWithTxPower_Impl {
             static constexpr auto _ = (validate_complete(), 0);
             using type = AdvertisementConfig<NewTxPower, IntervalMin, IntervalMax, Appearance,
-                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data>;
+                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data, LongName>;
         };
 
         template<uint16_t NewMin, uint16_t NewMax>
         struct ExitWithIntervals_Impl {
             static constexpr auto _ = (validate_complete(), 0);
             using type = AdvertisementConfig<TxPower, NewMin, NewMax, Appearance,
-                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data>;
+                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data, LongName>;
         };
 
         template<auto NewAppearance>
         struct ExitWithAppearance_Impl {
             static constexpr auto _ = (validate_complete(), 0);
             using type = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance,
-                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data>;
+                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data, LongName>;
         };
     };
 
@@ -853,6 +861,7 @@ namespace adv_config_detail {
         uint16_t IntervalMin,
         uint16_t IntervalMax,
         auto Appearance,
+        const char* LongName,
         const auto&... Data
     >
     struct WithManufacturerDataT {
@@ -880,7 +889,7 @@ namespace adv_config_detail {
             uint8_t... TLVBytes
         >
         struct Builder {
-            using ExitHelper = BuilderExitValidation<TxPower, IntervalMin, IntervalMax, Appearance,
+            using ExitHelper = BuilderExitValidation<TxPower, IntervalMin, IntervalMax, Appearance, LongName,
                                                       ManufacturerId, ManufacturerIdSet, TLVBytes...>;
 
             /// @brief Marker for trait detection - allows builder to be recognized as AdvertisementConfig
@@ -891,7 +900,7 @@ namespace adv_config_detail {
             ///          Note: This creates the final AdvertisementConfig directly without validation,
             ///          relying on compile-time checks at the point of actual use.
             using type = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, Appearance,
-                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data>;
+                blex_core::ManufacturerDataBuilder<ManufacturerId, TLVBytes...>::data, LongName>;
 
             /// Set manufacturer ID
             template<uint16_t NewId>
@@ -950,13 +959,13 @@ namespace adv_config_detail {
 
             // Exit methods - return AdvertisementConfig with raw data
             template<int8_t NewTxPower>
-            using WithTxPower = AdvertisementConfig<NewTxPower, IntervalMin, IntervalMax, Appearance, RawData>;
+            using WithTxPower = AdvertisementConfig<NewTxPower, IntervalMin, IntervalMax, Appearance, RawData, nullptr>;
 
             template<uint16_t NewMin, uint16_t NewMax>
-            using WithIntervals = AdvertisementConfig<TxPower, NewMin, NewMax, Appearance, RawData>;
+            using WithIntervals = AdvertisementConfig<TxPower, NewMin, NewMax, Appearance, RawData, nullptr>;
 
             template<auto NewAppearance>
-            using WithAppearance = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance, RawData>;
+            using WithAppearance = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance, RawData, nullptr>;
         };
 
         // Mode selection based on parameter count
@@ -990,7 +999,8 @@ template<
     uint16_t IntervalMin = 100,
     uint16_t IntervalMax = 150,
     auto Appearance = 0,  // 0 = BleAppearance::kUnknown (unknown device type)
-    const auto& ManufacturerData = blex_core::ManufacturerDataBuilder<>::data
+    const auto& ManufacturerData = blex_core::ManufacturerDataBuilder<>::data,
+    const char* LongName = nullptr  ///< Long/full device name for scan response (nullptr = use short name)
 >
 struct AdvertisementConfig {
     // Validate manufacturer data type (must be uint8_t[])
@@ -1039,6 +1049,9 @@ struct AdvertisementConfig {
     static constexpr const uint8_t* manufacturer_data = ManufacturerData;
     static constexpr size_t manufacturer_data_len = sizeof(ManufacturerData);
 
+    /// Long device name (nullptr = use short name)
+    static constexpr const char* long_name = LongName;
+
     // ESP32-S3 TX power range (validation)
     static constexpr int8_t min_tx_power = -12;  // dBm
     static constexpr int8_t max_tx_power = 9;    // dBm
@@ -1061,13 +1074,17 @@ struct AdvertisementConfig {
 
     // Fluent builder methods - each returns a new type with updated config
     template<int8_t NewTxPower>
-    using WithTxPower = AdvertisementConfig<NewTxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData>;
+    using WithTxPower = AdvertisementConfig<NewTxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData, LongName>;
 
     template<uint16_t NewMin, uint16_t NewMax>
-    using WithIntervals = AdvertisementConfig<TxPower, NewMin, NewMax, Appearance, ManufacturerData>;
+    using WithIntervals = AdvertisementConfig<TxPower, NewMin, NewMax, Appearance, ManufacturerData, LongName>;
 
     template<auto NewAppearance>
-    using WithAppearance = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance, ManufacturerData>;
+    using WithAppearance = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance, ManufacturerData, LongName>;
+
+    /// Set long/full device name for scan response (nullptr = use short name)
+    template<const char* NewLongName>
+    using WithLongName = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData, NewLongName>;
 
     /**
      * @brief Dual-mode manufacturer data configuration
@@ -1091,7 +1108,7 @@ struct AdvertisementConfig {
      * @endcode
      */
     template<const auto&... Data>
-    using WithManufacturerData = typename adv_config_detail::WithManufacturerDataT<TxPower, IntervalMin, IntervalMax, Appearance, Data...>::type;
+    using WithManufacturerData = typename adv_config_detail::WithManufacturerDataT<TxPower, IntervalMin, IntervalMax, Appearance, LongName, Data...>::type;
 };
 
 // Internal helpers for BLE unit conversions (hidden from public API)
@@ -1314,6 +1331,26 @@ struct CharacteristicCallbacks {
 
 // ---------------------- Server Base (Backend-Agnostic) ----------------------
 
+namespace blex_core {
+
+/// @brief Helper to safely extract device name from AdvConfig
+/// @details Uses SFINAE to avoid accessing AdvConfig::long_name when AdvConfig is void
+template<typename AdvConfig, const char* ShortName, typename = void>
+struct device_name_helper {
+    static constexpr const char* value = ShortName;
+};
+
+template<typename AdvConfig, const char* ShortName>
+struct device_name_helper<AdvConfig, ShortName, std::enable_if_t<!std::is_void_v<AdvConfig>>> {
+    // Debug: Check if long_name is set
+    static constexpr bool has_long_name_value = (AdvConfig::long_name != nullptr);
+
+    static constexpr const char* value =
+        has_long_name_value ? AdvConfig::long_name : ShortName;
+};
+
+}  // namespace blex_core
+
 /**
  * @brief Backend-agnostic server base type
  * @details Compile-time metadata: device name, services, advertising/connection config
@@ -1322,23 +1359,25 @@ struct CharacteristicCallbacks {
  */
 template<
     const char* ShortName,
-    const char* LongName = nullptr,
     typename Derived = void,
     typename... Args
 >
 struct ServerBase {
     using Base = std::conditional_t<std::is_void_v<Derived>, ServerBase, Derived>;  // CRTP
 
-    // Device identity
-    static constexpr const char* device_name = ShortName;           // Short name (advertising packet)
-    static constexpr const char* device_long_name = LongName;       // Long name (scan response, optional)
-
     // Extract configurations from variadic Args
-    using AdvConfig = blex_core::extract_adv_config<Args...>;
+    using AdvConfig = typename blex_core::extract_adv_config<Args...>::type;
     using ConnConfig = typename blex_core::extract_conn_config<Args...>::type;
     using SecurityConfig = typename blex_core::extract_security_config<Args...>::type;
     using CallbacksConfig = typename blex_core::extract_server_callbacks<Args...>::type;
     using ServicesTuple = typename blex_core::filter_non_config<Args...>::type;
+
+    // Device identity
+    static constexpr const char* short_name = ShortName;
+
+    // Long name: from AdvertisingConfig if provided, otherwise use short name
+    static constexpr const char* device_name =
+        blex_core::device_name_helper<AdvConfig, ShortName>::value;
 
     // Extract callbacks from ServerCallbacks config
     static constexpr auto ConnectHandler = CallbacksConfig::on_connect;

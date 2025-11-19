@@ -333,37 +333,27 @@ struct blex {
      * @details Main BLE server configuration. Inherits compile-time metadata from ServerBase via CRTP,
      * delegates runtime operations to ServerBackend.
      *
-     * @tparam ShortName Short name (used in advertising, and scan response if LongName not provided)
-     * @tparam LongName Long device name (used in scan response) - use nullptr for same as ShortName
+     * @tparam ShortName Short name for advertising packet (shows in BLE scanners)
      * @tparam Args Variadic list accepting:
-     *              - AdvertisementConfig<...> (optional, max 1)
+     *              - AdvertisementConfig<...> (optional, max 1) - use ::WithLongName<name> for scan response
      *              - ConnectionConfig<...> (optional, max 1)
      *              - SecurityConfig<...> (optional, max 1)
      *              - ServerCallbacks<...> (optional, max 1)
      *              - Service types (can be wrapped with PassiveAdvService/ActiveAdvService/BothAdvService)
      *
-     * @note Use Server<name> or Server<shortName, longName> or Server<shortName>::WithLongName<longName>
+     * @note Long/full device name for scan response can be set via AdvertisementConfig<>::WithLongName<name>
+     *       If not provided, short name is used for both advertising and scan response.
      */
     template<
         const char* ShortName,
-        const char* LongName = nullptr,
         typename... Args
     >
-    struct Server : ServerBase<ShortName, LongName, Server<ShortName, LongName, Args...>, Args...> {
-        using Base = ServerBase<ShortName, LongName, Server<ShortName, LongName, Args...>, Args...>;
+    struct Server : ServerBase<ShortName, Server<ShortName, Args...>, Args...> {
+        using Base = ServerBase<ShortName, Server<ShortName, Args...>, Args...>;
         using Backend = ServerBackend<Base>;
         using ConnectionHandle = typename Backend::connection_handle_t;
         using ConnectionInfo = typename Backend::ConnectionInfoType;
         static constexpr ConnectionHandle InvalidConnHandle = Backend::InvalidConnHandle;
-
-        // ---------------------- Builder: Long Name ----------------------
-
-        /**
-         * @brief Set a different long device name (scan response)
-         * @tparam NewLongName The full device name
-         */
-        template<const char* NewLongName>
-        using WithLongName = Server<ShortName, NewLongName, Args...>;
 
         // ---------------------- Lifecycle ----------------------
 

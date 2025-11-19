@@ -590,9 +590,9 @@ struct DescriptorBackend<AggregateFormatDescriptorBase<PresentationFormatDescrip
  * @details Provides runtime NimBLE server operations: initialization, advertising, connections
  * Inherits compile-time config from ServerBase.
  */
-template<const char* ShortName, const char* LongName, typename Derived, typename... Args>
-struct ServerBackend<ServerBase<ShortName, LongName, Derived, Args...>> {
-    using Config = ServerBase<ShortName, LongName, Derived, Args...>;
+template<const char* ShortName, typename Derived, typename... Args>
+struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
+    using Config = ServerBase<ShortName, Derived, Args...>;
     using connection_handle_t = uint16_t;
     using ConnectionInfoType = NimBLEConnInfo;
 
@@ -930,8 +930,8 @@ struct ServerBackend<ServerBase<ShortName, LongName, Derived, Args...>> {
      *          3. NimBLE stack defaults (if neither provided)
      *
      * Names are read from Config (ServerBase):
-     *   - device_name: Short name, always used in advertising packet
-     *   - device_long_name: Long name, if not nullptr - enables scan response
+     *   - short_name: Short name for advertising packet
+     *   - device_name: Long name if AdvConfig::long_name set, otherwise short_name
      *
      * @tparam PassiveServices Tuple of services advertised in the main packet
      * @tparam ActiveServices Tuple of services advertised in scan response
@@ -942,8 +942,12 @@ struct ServerBackend<ServerBase<ShortName, LongName, Derived, Args...>> {
 
         if (!adv) return;
 
-        constexpr const char* short_name = Config::device_name;
-        constexpr const char* long_name = Config::device_long_name;
+        constexpr const char* short_name = Config::short_name;
+        constexpr const char* device_name = Config::device_name;
+
+        BLEX_LOG_DEBUG("Advertising setup:\n");
+        BLEX_LOG_DEBUG("  short_name = \"%s\" (addr: %p)\n", short_name, (void*)short_name);
+        BLEX_LOG_DEBUG("  device_name = \"%s\" (addr: %p)\n", device_name, (void*)device_name);
 
         // Configure advertisement data (passive services + short name + manufacturer data)
         NimBLEAdvertisementData adv_data;
@@ -971,18 +975,25 @@ struct ServerBackend<ServerBase<ShortName, LongName, Derived, Args...>> {
 
         // Enable scan response if long name OR active services are configured
         constexpr bool has_active_services = !std::is_same_v<ActiveServices, std::tuple<>>;
+        constexpr bool has_long_name = (device_name != short_name);
 
-        if constexpr (long_name != nullptr || has_active_services) {
+        BLEX_LOG_DEBUG("  has_active_services = %s\n", has_active_services ? "true" : "false");
+        BLEX_LOG_DEBUG("  has_long_name = %s\n", has_long_name ? "true" : "false");
+
+        if constexpr (has_long_name || has_active_services) {
             // Enable scan response for extended data
             adv->enableScanResponse(true);
+            BLEX_LOG_DEBUG("  Scan response ENABLED\n");
 
             // Configure scan response data (active services + name)
             NimBLEAdvertisementData scan_resp;
 
-            // Use a long name if provided, otherwise use a short name
-            if constexpr (long_name != nullptr) {
-                scan_resp.setName(long_name, true);
+            // Use device_name (which is long name if provided, otherwise short_name)
+            if constexpr (has_long_name) {
+                BLEX_LOG_DEBUG("  Setting scan response name to: \"%s\" (long name)\n", device_name);
+                scan_resp.setName(device_name, true);
             } else {
+                BLEX_LOG_DEBUG("  Setting scan response name to: \"%s\" (short name)\n", short_name);
                 scan_resp.setName(short_name, false);
             }
 

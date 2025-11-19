@@ -129,12 +129,12 @@ bool read_imu(float (&imu_data)[9]) {
 // BLE
 // ============================================================================
 
-// Device name variables with external linkage for template parameters
-inline constexpr char deviceName[] = "Blex-IMU";
-inline constexpr char deviceNameShort[] = "IMU Streamer";
+/// Device name variables with external linkage for template parameters
+inline constexpr char shortName[] = "Blex-IMU";
+inline constexpr char longName[] = "IMU Streamer";
 
- // User Description text
- static constexpr char IMU_DESC_TEXT[] = "IMU: Accel(m/s^2) | Gyro(dps) | Mag(uT)";
+/// User Description text
+static constexpr char IMU_DESC_TEXT[] = "IMU: Accel(m/s^2) | Gyro(dps) | Mag(uT)";
 
 using blx = blexDefault;
 
@@ -174,9 +174,9 @@ using IMUService = blx::Service<
 >;
 
 using ImuDevice = blx::Server<
-    deviceName,
-    deviceNameShort,
+    shortName,
     blx::AdvertisementConfig<>
+        ::WithLongName<longName>
         ::WithTxPower<9>
         ::WithAppearance<blx::BleAppearance::kSensor>
         ::WithIntervals<120, 140>

@@ -257,20 +257,21 @@ Configure device names for advertising and scan response:
 
 ```cpp
 // Short name only (used for both advertising and scan response)
-using MyServer = MyBlex::Server<&shortName>;
+constexpr char shortName[] = "MyDevice";
+using MyServer = MyBlex::Server<shortName>;
 
-// Separate short and long names
-using MyServer = MyBlex::Server<&shortName, &longName>;
-
-// Or using fluent API
-using MyServer = MyBlex::Server<&shortName>
-    ::WithLongName<&longName>;
+// Separate short and long names using AdvertisementConfig
+constexpr char shortName[] = "MyDevice";
+constexpr char longName[] = "My Device Full Name";
+using MyServer = MyBlex::Server<shortName,
+    MyBlex::AdvertisementConfig<>::WithLongName<longName>
+>;
 ```
 
 **BLE naming behavior:**
-- **Short name**: Appears in advertising packet (limited space)
-- **Long name**: Appears in scan response (more space)
-- If only short name provided, it's used for both
+- **Short name**: Appears in advertising packet (limited space, required)
+- **Long name**: Appears in scan response (more space, optional via `AdvertisementConfig::WithLongName<>`)
+- If a long name is not provided, the short name is used for both advertising and scan response
 
 ## Advanced Topics
 
@@ -327,6 +328,7 @@ AdvertisementConfig<>
     ::WithAppearance<kGenericComputer>  // BLE appearance (see BleAppearance)
     ::WithIntervals<100, 200>           // Min/max advertising intervals (0.625ms units)
     ::WithManufacturerData<data>        // Custom manufacturer data
+    ::WithLongName<longName>            // Long/full device name for scan response (optional)
 ```
 
 ### ConnectionConfig

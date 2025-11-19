@@ -14,6 +14,7 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <blex.hpp>
+#include <services/device_info.hpp>
 
 
 // ============================================================================
@@ -39,11 +40,11 @@ static void onTemperatureRead(float& value) {
 // Server callbacks
 // ============================================================================
 
-static void onConnect(NimBLEConnInfo& conn) {
+static void onConnect(const NimBLEConnInfo& conn) {
     Serial.printf("Connected: %s\n", conn.getAddress().toString().c_str());
 }
 
-static void onDisconnect(NimBLEConnInfo& conn, int reason) {
+static void onDisconnect(const NimBLEConnInfo& conn, const int reason) {
     Serial.printf("Disconnected: %s (reason: %d)\n\n"
         "Waiting for connection..\n",
         conn.getAddress().toString().c_str(),
@@ -76,10 +77,10 @@ using EnvironmentalService = MyBlex::Service<
 
 using MyDevice = MyBlex::Server<
     deviceName,
-    deviceNameLong,
 
     // Advertising Configuration
     MyBlex::AdvertisementConfig<>
+        ::WithLongName<deviceNameLong>
         ::WithManufacturerData<>
             ::WithManufacturerId<0xFFFE>        // Unofficial Blim company id
             ::WithDeviceType<0xFE>              // uint8_t device type
@@ -130,7 +131,7 @@ void setup() {
 
 void loop() {
     // Simulate temperature changes: random walk within ±TEMP_CHANGE_MAX
-    float change = (random(-10, 11) / 10.0f) * TEMP_CHANGE_MAX;
+    const float change = static_cast<float>(random(-10, 11)) / 10.0f * TEMP_CHANGE_MAX;
     temperature += change;
     temperature = constrain(temperature, TEMP_MIN, TEMP_MAX);
 
@@ -141,7 +142,7 @@ void loop() {
     }
 
     // Print active connections
-    auto connections = MyDevice::getConnections();
+    const auto connections = MyDevice::getConnections();
     Serial.printf("\nActive connections: %u\n", connections.size());
     for (const auto& conn : connections) {
         Serial.printf("  - %s (RSSI: %d dBm)\n",
