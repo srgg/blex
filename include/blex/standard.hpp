@@ -463,6 +463,9 @@ struct AggregateFormatDescriptorBase : DescriptorBase<
     ::Permissions<>::AllowRead,
     0  // Size handled by NimBLE
 > {
+    // Marker trait for backend detection
+    struct is_aggregate_format_descriptor {};
+
     // Base is inherited from DescriptorBase via CRTP!
     static constexpr size_t num_descriptors = sizeof...(PresentationFormatDescriptors);
 

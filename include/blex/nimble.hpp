@@ -526,7 +526,7 @@ private:
 
 /**
  * @brief NimBLE backend for descriptors (handles both const and dynamic descriptors)
- * @details Checks is_const_descriptor flag and is_presentation_format_descriptor marker
+ * @details Checks is_const_descriptor flag and marker traits for special descriptor types
  */
 template<typename Desc>
 struct DescriptorBackend {
@@ -553,8 +553,20 @@ private:
         return std::false_type{};
     }
 
+    // Check if descriptor has is_aggregate_format_descriptor marker (SFINAE fallback)
+    template<typename D>
+    static constexpr auto check_aggregate_format(int) -> decltype(typename D::is_aggregate_format_descriptor{}, std::true_type{}) {
+        return std::true_type{};
+    }
+
+    template<typename D>
+    static constexpr std::false_type check_aggregate_format(...) {
+        return std::false_type{};
+    }
+
     static constexpr bool is_const_descriptor = check_const_flag<Desc>(0);
     static constexpr bool is_presentation_format = decltype(check_presentation_format<Desc>(0))::value;
+    static constexpr bool is_aggregate_format = decltype(check_aggregate_format<Desc>(0))::value;
 
 public:
     static NimBLEDescriptor* register_to_char(NimBLECharacteristic* pChar) {
@@ -562,8 +574,14 @@ public:
         if constexpr (is_presentation_format) {
             using Base = typename Desc::Base;
             return DescriptorBackend<Base>::register_to_char(pChar);
-        } else {
-            // Generic descriptor handling
+        }
+        // Delegate to Base specialization for aggregate format descriptors
+        else if constexpr (is_aggregate_format) {
+            using Base = typename Desc::Base;
+            return DescriptorBackend<Base>::register_to_char(pChar);
+        }
+        // Generic descriptor handling
+        else {
             using Base = typename Desc::Base;
 
             NimBLEDescriptor* desc = pChar->createDescriptor(
