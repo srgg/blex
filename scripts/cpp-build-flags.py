@@ -1,30 +1,41 @@
 Import("env")
 
-# C++-only compiler flags (applied only to .cpp files, not .c files)
+# C++20 build flags with embedded optimizations
 #
-# Rationale:
-#   - PlatformIO's build_flags applies to both C and C++ files
-#   - C++-specific flags would trigger warnings on C files
-#   - This script appends flags only to CXXFLAGS for clean compilation
+# This script is designed to be reusable across projects using the blex library.
+# It configures C++20 compilation with strict warnings and embedded-appropriate settings.
 #
 # Toolchain: GCC 12.2.0 (crosstool-NG esp-12.2.0) - Partial C++20 support
 
+# Remove -std=gnu++11 from all compiler flags (set by an ESP-IDF/Arduino framework)
+for var in ["CFLAGS", "CCFLAGS", "CXXFLAGS"]:
+    env[var] = [f for f in env.get(var, []) if f != "-std=gnu++11"]
+
+# ==================== C++20 Standard (Partial Support) ====================
+# NOTE: Espressif GCC 12.2.0 has PARTIAL C++20 support:
+#   ✓ Supported:
+#     - Concepts (template constraints)
+#     - [[nodiscard]] (without reason strings)
+#     - std::bool_constant
+#     - Custom buffer_view<T> (std::span alternative)
+#   ✗ NOT Supported:
+#     - consteval (not implemented despite __cpp_consteval macro claiming support)
+#     - constinit (not available)
+#     - std::span (header exists in toolchain but Arduino framework doesn't expose it)
+#     - [[nodiscard("reason")]] (only plain [[nodiscard]] works, no reason strings)
+#   ⚠ __cplusplus = 201709L (incorrectly reports C++17 despite -std=gnu++2a flag)
+
+# Set language standards
+env.Append(CFLAGS=[
+    "-std=gnu17",                # GNU C17 (C11 with bug fixes + GNU extensions)
+])
 env.Append(CXXFLAGS=[
-    # ==================== C++20 Standard (Partial Support) ====================
-    # NOTE: Espressif GCC 12.2.0 has PARTIAL C++20 support:
-    #   ✓ Supported:
-    #     - Concepts (template constraints)
-    #     - [[nodiscard]] (without reason strings)
-    #     - std::bool_constant
-    #     - Custom buffer_view<T> (std::span alternative)
-    #   ✗ NOT Supported:
-    #     - consteval (not implemented despite __cpp_consteval macro claiming support)
-    #     - constinit (not available)
-    #     - std::span (header exists in toolchain but Arduino framework doesn't expose it)
-    #     - [[nodiscard("reason")]] (only plain [[nodiscard]] works, no reason strings)
-    #   ⚠ __cplusplus = 201709L (incorrectly reports C++17 despite -std=gnu++2a flag)
     "-std=gnu++2a",              # GNU C++20 (includes GNU extensions like 'typeof')
-    "-fconcepts",                # Enable concepts (explicit enable)
+])
+
+# C++-only flags (would cause warnings on C files)
+env.Append(CXXFLAGS=[
+    "-fconcepts",                # Enable concepts (explicit enable for C++)
 
     # ==================== Embedded C++ ====================
     "-fno-exceptions",           # Disable exceptions (embedded best practice)
@@ -38,13 +49,6 @@ env.Append(CXXFLAGS=[
     "-Wall",                     # Standard warnings
     "-Wextra",                   # Extra warnings
     "-Werror=return-type",       # Missing return statement = compile error
-    "-Wnon-virtual-dtor",        # Warn: virtual methods without virtual destructor
-    "-Woverloaded-virtual",      # Warn: hidden virtual functions
-
-    # ==================== Suppress Third-Party Library Warnings ====================
-    "-Wno-unused-parameter",     # Embedded code often has unused params (callbacks)
-    "-Wno-psabi",                # Suppress ABI compatibility warnings (cross-compilation)
-    "-Wno-pedantic",             # Suppress pedantic warnings from Arduino/ESP-IDF (anonymous structs)
+    "-Woverloaded-virtual",      # Warn: hidden virtual functions (not in -Wall/-Wextra)
     "-Wno-suggest-override",     # Suppress missing override warnings from Arduino/Adafruit libs
-    "-Wno-variadic-macros",      # Suppress variadic macro warnings from NimBLE
 ])

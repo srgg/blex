@@ -25,6 +25,7 @@
 #include "blex/log.h"
 
 #include <Arduino.h>
+#include <cinttypes>  // For PRIu32, PRIx32
 
 #include <esp_ota_ops.h>
 #include "esp_partition.h"
@@ -164,13 +165,13 @@ namespace board_specific {
             constexpr size_t ERASE_CHUNK = 64 * 1024;  // 64KB chunks
             const size_t total_erase = otaPartition->size;
 
-            BLEX_LOG_INFO("[DFU] Erasing partition: %u bytes in %u chunks\n", total_erase, (total_erase + ERASE_CHUNK - 1) / ERASE_CHUNK);
+            BLEX_LOG_INFO("[DFU] Erasing partition: %" PRIu32 " bytes in %" PRIu32 " chunks\n", (uint32_t)total_erase, (uint32_t)((total_erase + ERASE_CHUNK - 1) / ERASE_CHUNK));
 
             for (size_t offset = 0; offset < total_erase; offset += ERASE_CHUNK) {
                 const size_t chunk_size = (offset + ERASE_CHUNK > total_erase) ? (total_erase - offset) : ERASE_CHUNK;
 
                 if (const esp_err_t rc = esp_partition_erase_range(otaPartition, offset, chunk_size); rc != ESP_OK) {
-                    BLEX_LOG_ERROR("[DFU] esp_partition_erase_range failed at offset=%u: %d (0x%X)\n", offset, rc, rc);
+                    BLEX_LOG_ERROR("[DFU] esp_partition_erase_range failed at offset=%" PRIu32 ": %d (0x%X)\n", (uint32_t)offset, rc, rc);
                     return OtaError::OTA_BEGIN_FAIL;
                 }
 
@@ -185,7 +186,7 @@ namespace board_specific {
         // Persistent progress: store offset, expected size, expected CRC
         bool persistProgress(const OtaManager::PersistableState& memento) {
             if (memento.written != otaOffset || memento.expectedSize != otaTotalSize) {
-                BLEX_LOG_ERROR("State mismatch: written=%u vs expected=%u, expectedSize=%u vs expected=%u\n",
+                BLEX_LOG_ERROR("State mismatch: written=%" PRIu32 " vs expected=%" PRIu32 ", expectedSize=%" PRIu32 " vs expected=%" PRIu32 "\n",
                     memento.written,
                     otaOffset,
                     memento.expectedSize,
@@ -265,7 +266,7 @@ namespace board_specific {
             }
 
             if (otaTotalSize != 0 && otaOffset != otaTotalSize) {
-                BLEX_LOG_ERROR("[DFU] commit: size mismatch, written=%u, expected=%u\n",
+                BLEX_LOG_ERROR("[DFU] commit: size mismatch, written=%" PRIu32 ", expected=%" PRIu32 "\n",
                                otaOffset, otaTotalSize);
                 return OtaError::SIZE_MISMATCH;
             }
@@ -362,7 +363,7 @@ bool OtaManager::begin(const uint32_t totalSize) {
     state.cached_crc = 0xFFFFFFFF;  // Reset CRC cache for fresh start
     setError(NONE);
 
-    BLEX_LOG_INFO("[DFU] begin() - expectedSize=%u\n", totalSize);
+    BLEX_LOG_INFO("[DFU] begin() - expectedSize=%" PRIu32 "\n", totalSize);
     return true;
 }
 
@@ -481,7 +482,7 @@ bool OtaManager::end() {
         // mismatch
         getImpl()->abort();
         setError(SIZE_MISMATCH);
-        BLEX_LOG_ERROR("[DFU] Size mismatch: written=%u, expected=%u\n",
+        BLEX_LOG_ERROR("[DFU] Size mismatch: written=%" PRIu32 ", expected=%" PRIu32 "\n",
             state.written, state.expectedSize);
         return false;
     }
@@ -676,10 +677,10 @@ namespace detail {
                 if (request->params.create.type != DFU_OBJ_TYPE_DATA) {
                     response.header.status = DFU_STATUS_INVALID_PARAMETER;
                 } else if (requested_size == 0 || requested_size > max_size) {
-                    BLEX_LOG_ERROR("[DFU] Invalid firmware size: %u (max=%u)\n", requested_size, max_size);
+                    BLEX_LOG_ERROR("[DFU] Invalid firmware size: %" PRIu32 " (max=%" PRIu32 ")\n", requested_size, max_size);
                     response.header.status = DFU_STATUS_INVALID_PARAMETER;
                 } else if (!OtaManager::begin(requested_size)) {
-                    BLEX_LOG_ERROR("[DFU] begin(size=%X) failed: error %d\n",
+                    BLEX_LOG_ERROR("[DFU] begin(size=%" PRIX32 ") failed: error %d\n",
                         requested_size,
                         OtaManager::lastError()
                     );
@@ -728,7 +729,7 @@ namespace detail {
                 const uint32_t bytes = OtaManager::getOffset();
                 const uint32_t crc = OtaManager::getCrc();
                 writer(reinterpret_cast<const uint8_t*>(&response), responseLength);
-                BLEX_LOG_INFO("[DFU] Firmware update applied: %u bytes, crc=0x%08X. Rebooting device...\n", bytes, crc);
+                BLEX_LOG_INFO("[DFU] Firmware update applied: %" PRIu32 " bytes, crc=0x%08" PRIX32 ". Rebooting device...\n", bytes, crc);
                 delay(500);
 
                 // Trigger reboot to apply new  firmware
@@ -765,12 +766,12 @@ namespace detail {
 #if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
             // Log a human-readable payload for commands with data
             if (request->header.opcode == OP_CODE_SELECT_OBJECT && responseLength > sizeof(dfu_response_header_t)) {
-                BLEX_LOG_DEBUG("[DFU CMD]   SELECT response: offset=%u crc=0x%08X max_size=%u\n",
+                BLEX_LOG_DEBUG("[DFU CMD]   SELECT response: offset=%" PRIu32 " crc=0x%08" PRIX32 " max_size=%" PRIu32 "\n",
                     response.data.select_response_data.offset,
                     response.data.select_response_data.crc32,
                     response.data.select_response_data.max_size);
             } else if (request->header.opcode == OP_CODE_CALCULATE_CRC && responseLength > sizeof(dfu_response_header_t)) {
-                BLEX_LOG_DEBUG("[DFU CMD]   CRC response: offset=%u crc=0x%08X\n",
+                BLEX_LOG_DEBUG("[DFU CMD]   CRC response: offset=%" PRIu32 " crc=0x%08" PRIX32 "\n",
                     response.data.checksum_data.offset,
                     response.data.checksum_data.crc32);
             } else {
@@ -812,7 +813,7 @@ namespace detail {
                 constexpr size_t responseLength = sizeof(protocol::dfu_checksum_data_t) + sizeof(protocol::dfu_response_header_t);
                 writer(reinterpret_cast<uint8_t*>(&response), responseLength);
 
-                BLEX_LOG_INFO("[DFU] PRN notification sent (offset=%u crc=0x%08X)\n", offset, crc32);
+                BLEX_LOG_INFO("[DFU] PRN notification sent (offset=%" PRIu32 " crc=0x%08" PRIX32 ")\n", offset, crc32);
             } else {
                 BLEX_LOG_ERROR("[DFU] write() failed: error %d\n",
                     OtaManager::lastError()

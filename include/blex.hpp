@@ -164,6 +164,9 @@ struct blex {
     template<typename Tag>
     using lock_policy = LockPolicy<Tag>;
 
+    // Expose the connection info type at blex level (backend-independent alias)
+    using ConnectionInfo = NimBLEConnInfo;
+
     // Re-export standard BLE types
     using BleAppearance = blex_standard::BleAppearance;
     using BleIOCapability = ::BleIOCapability;
