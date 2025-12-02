@@ -116,6 +116,53 @@ EXIT_CONNECTION_LOST = 6
 EXIT_INTERRUPTED = 130
 
 # ----------------------------
+# ESP32 CRC32 compatibility
+# ----------------------------
+# CRC-32 (reflected) implementation matching esp_rom_crc32_le
+# - polynomial (reflected): 0xEDB88320
+# - initial CRC value: 0xFFFFFFFF
+# - NO final XOR (esp_rom_crc32_le returns raw accumulator)
+#
+# Device OTA code:
+#   cached_crc = 0xFFFFFFFF (init)
+#   cached_crc = esp_crc32_le(cached_crc, data, len)  <- accumulates, no XOR
+#   getCrc() returns ~cached_crc  <- final XOR applied here
+
+def _make_crc32_table() -> list:
+    table = []
+    for i in range(256):
+        crc = i
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xEDB88320
+            else:
+                crc >>= 1
+        table.append(crc & 0xFFFFFFFF)
+    return table
+
+_CRC32_TABLE = _make_crc32_table()
+
+def esp_crc32(data: bytes) -> int:
+    """
+    Compute CRC-32 matching ESP32's esp_crc32_le() with device OTA behavior.
+
+    esp_crc32_le uses:
+      - Polynomial: 0xEDB88320 (IEEE 802.3 reflected)
+      - Init: 0x00000000 (NOT 0xFFFFFFFF!)
+      - No final XOR
+
+    Device code passes 0xFFFFFFFF as init, but esp_crc32_le ignores it
+    and always starts from 0. The device getCrc() returns ~cached_crc,
+    but since there's no init XOR, the result is just the raw CRC.
+    """
+    c = 0  # esp_crc32_le uses init=0 internally
+    for b in data:
+        idx = (c ^ b) & 0xFF
+        c = (_CRC32_TABLE[idx] ^ (c >> 8)) & 0xFFFFFFFF
+    return c  # No final XOR - matches device output directly
+
+
+# ----------------------------
 # Logging helper
 # ----------------------------
 logging.basicConfig(
@@ -239,15 +286,18 @@ class BLETransport:
             raise DeviceNotFound(f"Device named '{name}' advertising DFU service not found")
         return candidate
 
-    async def connect(self, device: Any) -> None:
+    async def connect(self, device: Any, requested_mtu: int = 517) -> None:
         """
-        Connect to the device.
+        Connect to the device and negotiate MTU.
         `device` can be a BLEDevice or an address string, depending on the platform.
+        `requested_mtu` is the MTU to request (default 517 = BLE max).
         """
         self._logger.debug("Connecting to device %s", getattr(device, "address", str(device)))
         self._client = BleakClient(device, disconnected_callback=self._on_disconnect)
         try:
             await self._client.connect()
+            # Query negotiated MTU for chunk size calculation
+            self._mtu = self._client.mtu_size
             await self._client.start_notify(self.ctrl_uuid, self._on_notification)
             await asyncio.sleep(0.2)
         except Exception as e:
@@ -562,8 +612,13 @@ class UploadData(DFUCommand):
         uploader.log.indent()
         try:
             offset = self.resume_offset
-            packets = offset // uploader.chunk_size
+            # Don't carry over packet count on resume - device counter resets on boot
+            packets = 0
+
             prn_future = uploader.waiter.register_prn()
+
+            import time
+            batch_start = time.perf_counter()
 
             while offset < self.total:
                 chunk = self.firmware[offset : offset + uploader.chunk_size]
@@ -576,8 +631,16 @@ class UploadData(DFUCommand):
                     await asyncio.sleep(0.01)
 
                 if uploader.prn > 0 and (packets % uploader.prn) == 0:
+                    send_time = time.perf_counter() - batch_start
+                    t0 = time.perf_counter()
                     prn_off, prn_crc = await uploader.waiter.wait_prn(prn_future, timeout=12.0)
-                    local_crc = zlib.crc32(self.firmware[:prn_off]) & 0xFFFFFFFF
+                    t1 = time.perf_counter()
+                    # zlib.crc32 uses different polynomial than ESP32's esp_crc32_le
+                    # local_crc = zlib.crc32(self.firmware[:prn_off]) & 0xFFFFFFFF
+                    local_crc = esp_crc32(self.firmware[:prn_off])
+                    t2 = time.perf_counter()
+                    uploader.log.debug("PRN timing: send=%.3fs wait=%.3fs crc=%.3fs", send_time, t1-t0, t2-t1)
+                    batch_start = time.perf_counter()  # Reset for next batch
                     if local_crc != prn_crc:
                         raise VerificationFailed(
                             f"PRN CRC mismatch at {prn_off}: device=0x{prn_crc:08X} local=0x{local_crc:08X}"
@@ -653,7 +716,13 @@ class DFUUploader:
             try:
                 print(f"Connecting to {getattr(device, 'name', str(device))}...", flush=True)
                 await self.transport.connect(device)
-                print(f"✓ Connected to {getattr(device, 'name', str(device))}", flush=True)
+                # Auto-adjust chunk size based on negotiated MTU (MTU - 3 for ATT header)
+                max_chunk = self.transport._mtu - 3
+                if self.chunk_size > max_chunk:
+                    print(f"✓ Connected (MTU={self.transport._mtu}, chunk={self.chunk_size}→{max_chunk})", flush=True)
+                    self.chunk_size = max_chunk
+                else:
+                    print(f"✓ Connected (MTU={self.transport._mtu}, chunk={self.chunk_size})", flush=True)
                 break
             except Exception as exc:
                 last_exc = exc
@@ -679,7 +748,9 @@ class DFUUploader:
             dev_offset, dev_crc, _ = await self.select_object(obj_type)
             resume_offset = 0
             if dev_offset > 0:
-                local_crc = zlib.crc32(firmware[:dev_offset]) & 0xFFFFFFFF
+                # zlib.crc32 uses different polynomial than ESP32's esp_crc32_le
+                # local_crc = zlib.crc32(firmware[:dev_offset]) & 0xFFFFFFFF
+                local_crc = esp_crc32(firmware[:dev_offset])
                 if dev_offset == total and local_crc == dev_crc:
                     print(f"Firmware already uploaded: {total:,} bytes, CRC=0x{local_crc:08X}", flush=True)
                     print("Activating firmware on device...", flush=True)
@@ -701,7 +772,9 @@ class DFUUploader:
 
             # Final CRC verify
             calc_off, calc_crc = await CalculateCRC().execute(self)
-            local_crc = zlib.crc32(firmware[:calc_off]) & 0xFFFFFFFF
+            # zlib.crc32 uses different polynomial than ESP32's esp_crc32_le
+            # local_crc = zlib.crc32(firmware[:calc_off]) & 0xFFFFFFFF
+            local_crc = esp_crc32(firmware[:calc_off])
             if calc_off != total or calc_crc != local_crc:
                 raise VerificationFailed(
                     f"Verification failed: device_off={calc_off} device_crc=0x{calc_crc:08X} local_crc=0x{local_crc:08X}"

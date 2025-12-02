@@ -463,6 +463,20 @@ struct blex {
             return Backend::getConnections();
         }
 
+        /**
+         * @brief Request connection parameter update for all connected peers
+         * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+         * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+         * @param latency Slave latency (number of connection events to skip, 0-499)
+         * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+         * @return true if request sent to at least one peer, false if no connections
+         * @note The central (phone/computer) may reject or modify these parameters
+         */
+        static bool updateConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                            uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+            return Backend::updateConnectionParams(min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+
         // ---------------------- Service Management ----------------------
 
         /**

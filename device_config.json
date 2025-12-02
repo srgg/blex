@@ -1,0 +1,15 @@
+{
+  "manufacturer": "BLIMCo",
+  "manufacturer_id": 65534,
+  "hardware_version": "1.0",
+  "devices": {
+    "ecda3b5c836a": {
+      "serial_number": "FS3-001",
+      "ble_address": "ec:da:3b:5c:83:6a",
+      "ble_device": "e20e664a4716aba3abc6b9a0329b5b2e",
+      "wifi_address": "ec:da:3b:5c:83:68",
+      "name": "D1",
+      "long_name": "BLIM IMU Stream"
+    }
+  }
+}

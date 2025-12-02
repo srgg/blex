@@ -118,11 +118,11 @@ struct unwrap_service_impl {
 
 template<typename T>
 struct unwrap_service_impl<T, std::enable_if_t<ServiceWrapper<T>>> {
-    using type = typename T::service_type;
+    using type = T::service_type;
 };
 
 template<typename T>
-using unwrap_service = typename unwrap_service_impl<T>::type;
+using unwrap_service = unwrap_service_impl<T>::type;
 
 /// @brief Type aliases for template parameter packs using std::tuple
 /// @details Eliminates custom pack types - std::tuple provides identical functionality
@@ -137,14 +137,14 @@ template<typename... Descs>
 using DescriptorsPack = std::tuple<Descs...>;
 
 // Predicates for filtering (concept-based with SFINAE fallback for member access)
-template<typename T, typename = void>
+template<typename, typename = void>
 struct is_passive_adv_pred : std::false_type {};
 
 template<typename T>
 struct is_passive_adv_pred<T, std::enable_if_t<ServiceWrapper<T>>>
     : std::bool_constant<T::passive_adv> {};
 
-template<typename T, typename = void>
+template<typename, typename = void>
 struct is_active_adv_pred : std::false_type {};
 
 template<typename T>
@@ -164,7 +164,7 @@ struct concat_packs<std::tuple<T1...>, std::tuple<T2...>> {
 // ---------------------- Generic Filter (DRY principle) ----------------------
 
 /**
- * @brief Generic type filter: keeps or excludes types based on predicate
+ * @brief Generic type filter: keeps or excludes types based on a predicate
  * @tparam Predicate Template template parameter - trait with ::value member
  * @tparam ResultPack Pack type to return (std::tuple, ServicesPack, DescriptorsPack, etc.)
  * @tparam IncludeOnMatch true = keep matching types, false = exclude matching types
@@ -217,7 +217,13 @@ using filter_non_config = filter_types<is_any_config, std::tuple, false, Args...
 template<typename T, auto CallbackFunc>
 struct CallbackTraits {
     static constexpr bool is_valid_on_read = std::is_invocable_v<decltype(CallbackFunc), T&>;
-    static constexpr bool is_valid_on_write = std::is_invocable_v<decltype(CallbackFunc), const T&>;
+    static constexpr bool is_valid_on_write =
+        // Standard: callback(const T&)
+        std::is_invocable_v<decltype(CallbackFunc), const T&> ||
+        (std::is_array_v<T> &&
+        // callback(const uint8_t*, size_t) for uint8_t[N] types
+         std::is_same_v<std::remove_extent_t<T>, uint8_t> &&
+         std::is_invocable_v<decltype(CallbackFunc), const uint8_t*, size_t>);
     static constexpr bool is_valid_on_status = std::is_invocable_v<decltype(CallbackFunc), int>;
     static constexpr bool is_valid_on_subscribe = std::is_invocable_v<decltype(CallbackFunc), uint16_t>;
 };
@@ -259,7 +265,7 @@ namespace blex_core {
  * @tparam Default Type to return if no match found
  * @tparam Args Variadic pack to search
  */
-template<template<typename> class Predicate, typename Default, typename...>
+template<template<typename> class Predicate, typename Default, typename... Args>
 struct extract_first_matching {
     using type = Default;
 };
@@ -381,11 +387,11 @@ struct unwrap_adv_config_impl {
 
 template<typename T>
 struct unwrap_adv_config_impl<T, std::void_t<typename T::type>> {
-    using type = typename T::type;
+    using type = T::type;
 };
 
 template<typename T>
-using unwrap_adv_config = typename unwrap_adv_config_impl<T>::type;
+using unwrap_adv_config = unwrap_adv_config_impl<T>::type;
 
 /// @brief Extract AdvertisementConfig from variadic args, or void if not provided
 /// @details Automatically unwraps Builder::type to final AdvertisementConfig
@@ -472,8 +478,8 @@ namespace detail {
         static_assert(write <= SecPerm::Authorized, "Invalid write security level");
 
         // API for NimBLE integration - operation enabled flags
-        static constexpr bool canRead = (read > SecPerm::Disabled);
-        static constexpr bool canWrite = (write > SecPerm::Disabled);
+        static constexpr bool canRead = read > SecPerm::Disabled;
+        static constexpr bool canWrite = write > SecPerm::Disabled;
         static constexpr bool canWriteNoResponse = writeNoResp;
         static constexpr bool canNotify = notify;
         static constexpr bool canIndicate = indicate;
@@ -647,7 +653,7 @@ struct CharacteristicBase {
     static constexpr auto _ = (blex_core::check_uuid_type<decltype(UUID)>(), 0);
 
     // Extract CharacteristicCallbacks config from Args (or use default with all nullptr)
-    using CallbacksConfig = typename blex_core::extract_char_callbacks<Args...>::type;
+    using CallbacksConfig = blex_core::extract_char_callbacks<Args...>::type;
 
     // Extract callbacks directly from config
     using ReadHandlerType = decltype(CallbacksConfig::on_read);
@@ -670,8 +676,8 @@ struct CharacteristicBase {
                   "Invalid BLE OnWrite callback: must be invocable with 'const T&' and characteristic must allow Write or WriteNoResponse");
 
     static_assert(SubscribeHandler == nullptr ||
-                  (blex_core::CallbackTraits<T, SubscribeHandler>::is_valid_on_subscribe && Perms::canNotify),
-                  "Invalid BLE OnSubscribe callback: must be invocable with 'uint16_t' and characteristic must allow Notifications");
+                  (blex_core::CallbackTraits<T, SubscribeHandler>::is_valid_on_subscribe && (Perms::canNotify || Perms::canIndicate)),
+                  "Invalid BLE OnSubscribe callback: must be invocable with 'uint16_t' and characteristic must allow Notify or Indicate");
 
     static_assert(StatusHandler == nullptr ||
                   blex_core::CallbackTraits<T, StatusHandler>::is_valid_on_status,
@@ -682,7 +688,7 @@ struct CharacteristicBase {
     using value_type = T;
     static constexpr auto uuid = UUID;
     using perms_type = Perms;
-    using descriptors_pack = typename blex_core::filter_descriptors_from_args<Args...>::type;
+    using descriptors_pack = blex_core::filter_descriptors_from_args<Args...>::type;
     static constexpr bool is_const_characteristic = false;
 
     // Validation hook for descriptors
@@ -916,13 +922,13 @@ namespace adv_config_detail {
 
             // Exit methods - validate and return AdvertisementConfig (validation helpers in detail namespace)
             template<int8_t NewTxPower>
-            using WithTxPower = typename ExitHelper::template ExitWithTxPower_Impl<NewTxPower>::type;
+            using WithTxPower = ExitHelper::template ExitWithTxPower_Impl<NewTxPower>::type;
 
             template<uint16_t NewMin, uint16_t NewMax>
-            using WithIntervals = typename ExitHelper::template ExitWithIntervals_Impl<NewMin, NewMax>::type;
+            using WithIntervals = ExitHelper::template ExitWithIntervals_Impl<NewMin, NewMax>::type;
 
             template<auto NewAppearance>
-            using WithAppearance = typename ExitHelper::template ExitWithAppearance_Impl<NewAppearance>::type;
+            using WithAppearance = ExitHelper::template ExitWithAppearance_Impl<NewAppearance>::type;
         };
 
         // Raw value mode implementation (when param_count == 1)
@@ -982,12 +988,12 @@ namespace adv_config_detail {
             using type = RawValue<FirstData>;
         };
 
-        using type = typename SelectMode<param_count, Data...>::type;
+        using type = SelectMode<param_count, Data...>::type;
     };
 } // namespace adv_config_detail
 
 /**
- * @brief Compile-time advertisement configuration with fluent builder interface
+ * @brief Compile-time advertisement configuration with a fluent builder interface
  * @tparam TxPower Transmission power in dBm (-12 to 9)
  * @tparam IntervalMin Minimum advertising interval in ms (20 to 10240)
  * @tparam IntervalMax Maximum advertising interval in ms (20 to 10240)
@@ -1082,7 +1088,7 @@ struct AdvertisementConfig {
     template<auto NewAppearance>
     using WithAppearance = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, NewAppearance, ManufacturerData, LongName>;
 
-    /// Set long/full device name for scan response (nullptr = use short name)
+    /// Set a long(full) device name for scan response (nullptr = use short name)
     template<const char* NewLongName>
     using WithLongName = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData, NewLongName>;
 
@@ -1108,7 +1114,7 @@ struct AdvertisementConfig {
      * @endcode
      */
     template<const auto&... Data>
-    using WithManufacturerData = typename adv_config_detail::WithManufacturerDataT<TxPower, IntervalMin, IntervalMax, Appearance, LongName, Data...>::type;
+    using WithManufacturerData = adv_config_detail::WithManufacturerDataT<TxPower, IntervalMin, IntervalMax, Appearance, LongName, Data...>::type;
 };
 
 // Internal helpers for BLE unit conversions (hidden from public API)
@@ -1265,13 +1271,13 @@ struct ServerCallbacks {
 
     // Fluent builder methods - each validates signature and returns new type
     template<auto NewCallback>
-    using WithOnConnect = typename server_callbacks_detail::WithOnConnectImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
+    using WithOnConnect = server_callbacks_detail::WithOnConnectImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
 
     template<auto NewCallback>
-    using WithOnDisconnect = typename server_callbacks_detail::WithOnDisconnectImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
+    using WithOnDisconnect = server_callbacks_detail::WithOnDisconnectImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
 
     template<auto NewCallback>
-    using WithOnMTUChange = typename server_callbacks_detail::WithOnMTUChangeImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
+    using WithOnMTUChange = server_callbacks_detail::WithOnMTUChangeImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
 };
 
 // Internal implementation details for CharacteristicCallbacks (hidden from user-facing API)
@@ -1317,16 +1323,16 @@ struct CharacteristicCallbacks {
 
     // Fluent builder methods - each returns a new type with an updated callback
     template<auto NewCallback>
-    using WithOnRead = typename char_callbacks_detail::WithOnReadImpl<NewCallback, OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>::type;
+    using WithOnRead = char_callbacks_detail::WithOnReadImpl<NewCallback, OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>::type;
 
     template<auto NewCallback>
-    using WithOnWrite = typename char_callbacks_detail::WithOnWriteImpl<NewCallback, OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>::type;
+    using WithOnWrite = char_callbacks_detail::WithOnWriteImpl<NewCallback, OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>::type;
 
     template<auto NewCallback>
-    using WithOnStatus = typename char_callbacks_detail::WithOnStatusImpl<NewCallback, OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>::type;
+    using WithOnStatus = char_callbacks_detail::WithOnStatusImpl<NewCallback, OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>::type;
 
     template<auto NewCallback>
-    using WithOnSubscribe = typename char_callbacks_detail::WithOnSubscribeImpl<NewCallback, OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>::type;
+    using WithOnSubscribe = char_callbacks_detail::WithOnSubscribeImpl<NewCallback, OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>::type;
 };
 
 // ---------------------- Server Base (Backend-Agnostic) ----------------------
@@ -1343,7 +1349,7 @@ struct device_name_helper {
 template<typename AdvConfig, const char* ShortName>
 struct device_name_helper<AdvConfig, ShortName, std::enable_if_t<!std::is_void_v<AdvConfig>>> {
     // Debug: Check if long_name is set
-    static constexpr bool has_long_name_value = (AdvConfig::long_name != nullptr);
+    static constexpr bool has_long_name_value = AdvConfig::long_name != nullptr;
 
     static constexpr const char* value =
         has_long_name_value ? AdvConfig::long_name : ShortName;
@@ -1366,11 +1372,11 @@ struct ServerBase {
     using Base = std::conditional_t<std::is_void_v<Derived>, ServerBase, Derived>;  // CRTP
 
     // Extract configurations from variadic Args
-    using AdvConfig = typename blex_core::extract_adv_config<Args...>::type;
-    using ConnConfig = typename blex_core::extract_conn_config<Args...>::type;
-    using SecurityConfig = typename blex_core::extract_security_config<Args...>::type;
-    using CallbacksConfig = typename blex_core::extract_server_callbacks<Args...>::type;
-    using ServicesTuple = typename blex_core::filter_non_config<Args...>::type;
+    using AdvConfig = blex_core::extract_adv_config<Args...>::type;
+    using ConnConfig = blex_core::extract_conn_config<Args...>::type;
+    using SecurityConfig = blex_core::extract_security_config<Args...>::type;
+    using CallbacksConfig = blex_core::extract_server_callbacks<Args...>::type;
+    using ServicesTuple = blex_core::filter_non_config<Args...>::type;
 
     // Device identity
     static constexpr const char* short_name = ShortName;
@@ -1385,8 +1391,8 @@ struct ServerBase {
     static constexpr auto MTUChangeHandler = CallbacksConfig::on_mtu_change;
 
     // Advertising service filtering (compile-time)
-    using PassiveServices = typename blex_core::filter_services_pack<blex_core::is_passive_adv_pred, ServicesTuple>::type;
-    using ActiveServices = typename blex_core::filter_services_pack<blex_core::is_active_adv_pred, ServicesTuple>::type;
+    using PassiveServices = blex_core::filter_services_pack<blex_core::is_passive_adv_pred, ServicesTuple>::type;
+    using ActiveServices = blex_core::filter_services_pack<blex_core::is_active_adv_pred, ServicesTuple>::type;
 };
 
 // ---------------------- ServerBackend Trait (Forward Declaration) ----------------------

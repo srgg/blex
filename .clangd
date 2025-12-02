@@ -1,0 +1,21 @@
+CompileFlags:
+  Add:
+    # Tell clangd we're targeting Xtensa ESP32-S3, not the host architecture
+    - "--target=xtensa-esp32s3-elf"
+    # Use the correct sysroot for ESP32-S3
+    - "--sysroot=/Users/srg/.platformio/packages/toolchain-xtensa-esp32s3/xtensa-esp32s3-elf"
+    # Suppress clangd warnings that don't apply to Xtensa
+    # - "-Wno-unknown-attributes"
+
+Diagnostics:
+  # Suppress specific clangd false positives
+  Suppress:
+    # Clangd doesn't understand Xtensa inline assembly constraints
+    # - "invalid-asm-output-constraint"
+    # - "-Winline-asm"
+
+  #ClangTidy:
+    # Keep clang-tidy checks but exclude problematic ones for embedded
+   # Remove:
+    #  - readability-identifier-length
+     # - modernize-use-trailing-return-type

@@ -32,73 +32,153 @@
  *   - **CALCULATE_CRC/SELECT_OBJECT**: `[offset:4][crc32:4]` (+ `[max_size:4]` for SELECT)
  *   - **Others**: No data payload
  *
- * # Implementation Details
- * - **Resume**: NVS stores offset/size every 32KB; client queries via SELECT_OBJECT
- * - **Verification**: CRC32 only (PRODUCTION: replace with ECDSA signature verification)
- * - **Packet Receipt Notification (PRN)**: Automatic CRC responses every N data packets
- * - **Watchdog**: Connection keepalive via periodic vTaskDelay() during long operations
+ * # Client Protocol Flows
  *
- * @note Thread-safe: OtaServiceImpl uses per-service ScopedLock
- * @warning CRC32 is NOT cryptographically secure - add signature verification for production
+ * ## Fresh Firmware Update (Erase and Write from Zero)
+ * 1. **CREATE_OBJECT** (type=DATA, size=firmware_size)
+ *    - Server erases partition, sets expectedSize=firmware_size, offset=0
+ *    - Response: [0x60][0x01][SUCCESS]
+ * 2. **SET_RECEIPT_NOTIFICATION** (prn=16) [optional]
+ *    - Server enables automatic CRC notifications every 16 data packets
+ *    - Response: [0x60][0x02][SUCCESS]
+ * 3. Write firmware via **Data Characteristic** (≤512-byte chunks, no response)
+ *    - Server increments offset, persists to NVS every 32KB
+ *    - If PRN enabled: auto-sends [0x60][0x03][SUCCESS][offset:4][crc32:4] every N packets
+ * 4. **EXECUTE_OBJECT**
+ *    - Server verifies size==expectedSize, validates CRC, sets boot partition, reboots
+ *    - Response: [0x60][0x04][SUCCESS] then reboot
+ *
+ * ## Resume After Interruption (Continue from Persisted Offset)
+ * 1. **Device boots**: NVS loads {offset, expectedSize, CRC} into OtaManager static state
+ * 2. **SELECT_OBJECT** (type=DATA)
+ *    - Server reads current state from NVS/memory
+ *    - Response: [0x60][0x06][SUCCESS][offset:4][crc32:4][max_size:4]
+ * 3. **Client decision based on CRC verification**:
+ *    - **CRC match**: Resume - write remaining bytes from offset (skip CREATE_OBJECT, no erase)
+ *    - **CRC mismatch**: Restart - call CREATE_OBJECT (erases partition, resets offset=0)
+ * 4. Write remaining firmware via **Data Characteristic** (from offset onwards)
+ *    - Server continues incrementing offset, persisting every 32KB
+ * 5. **EXECUTE_OBJECT** to finalize and reboot
+ *
+ * # Implementation Details
+ * - **State Persistence**: NVS stores {offset, expectedSize} every 32KB + on CREATE_OBJECT
+ * - **Resume Mechanism**: Static initialization loads NVS state on boot; SELECT_OBJECT queries it
+ * - **Erase Control**: CREATE_OBJECT erases entire partition; resume avoids CREATE to preserve data
+ * - **CRC Verification**: Incremental CRC32 cached in memory, computed from flash on first SELECT
+ * - **Packet Receipt Notification (PRN)**: Auto-notification every N packets (8-128, default off)
+ * - **Connection Keepalive**: vTaskDelay() every 32 packets (write), 16 blocks (CRC), 64KB (erase)
+ *
+ * @note Thread-safe: OtaServiceImpl uses per-service ScopedLock for all operations
+ * @note Resume requires NVS persistence + client CRC verification; server doesn't auto-resume
+ * @warning CRC32 detects corruption but NOT tampering - add ECDSA signature verification for production
  * @see Nordic DFU Protocol: https://docs.nordicsemi.com/bundle/nrf5_SDK_v17.1.1/page/lib_dfu_transport.html
  */
 
 #ifndef DEVICE_OTA_SVC_HPP_
 #define DEVICE_OTA_SVC_HPP_
 
-#include <vector>
-#include <NimBLEDevice.h>
 #include "services/ota_fwd.hpp"
-#include "blex.hpp"
+#include "blex/binary_command.hpp"
+#include "blex/platform.hpp"
 
-namespace detail {
-    /// @brief OTA service implementation - characteristic definitions and callbacks
-    template<typename Blex>
-    class OtaServiceImpl {
-        using Perms = typename Blex::template Permissions<>;
-        using CharCallbacks = typename Blex::template CharacteristicCallbacks<>;
-        using guard_t = blex_sync::ScopedLock<Blex::template lock_policy, OtaServiceImpl>;
+namespace ota
+{
+    namespace detail {
+        /**
+         * @brief OTA service implementation using binary command dispatch
+         * @tparam Blex blex<LockPolicy> type for characteristic definitions
+         */
+        template<typename Blex>
+        class OtaServiceImpl {
+            using Perms = Blex::template Permissions<>;
+            using CharCallbacks = Blex::template CharacteristicCallbacks<>;
+            using guard_t = blex_sync::ScopedLock<Blex::template lock_policy, OtaServiceImpl>;
 
-        static void ctrlWriter(const uint8_t* data, size_t len) {
-            CtrlChar::setValue(data, len);
-        }
+            /**
+             * @brief Write response via Ctrl characteristic notify
+             */
+            static void ctrlWriter(const uint8_t* data, size_t len) {
+                CtrlChar::setValue(data, len);
+            }
 
-        static void onWriteCtrl(const std::vector<uint8_t>& data) {
-            guard_t guard;
-            DfuProcessor::instance()->handle_command(ctrlWriter, data.data(),data.size());
-        }
-
-        static void onWriteData(const std::vector<uint8_t>& data) {
-            guard_t guard;
-            DfuProcessor::instance()->handle_write_data(ctrlWriter, data.data(),data.size());
-        }
-    public:
-        // DFU Ctrl - UUID moved to ota.cpp to prevent template instantiation
-        using CtrlChar = typename Blex::template Characteristic<
-            std::vector<uint8_t>,
-            ota_uuids::DFU_CTRL_UUID_STR,
-            typename Perms
-                ::AllowWrite
-                ::AllowNotify,
-            typename CharCallbacks::template WithOnWrite<onWriteCtrl>
+            /**
+             * @brief Command dispatcher - opcode + handler, payload auto-deduced
+             */
+            using command_dispatcher = blex_binary_command::Dispatcher<
+                blex_binary_command::Command<protocol::CREATE_OBJECT,      [](const protocol::create_object_payload_t& payload){
+                    guard_t guard;
+                    dfu::doCreateObject(ctrlWriter, payload);
+            }>,
+            blex_binary_command::Command<protocol::SET_RECEIPT_NOTIFY, [](const protocol::set_prn_payload_t& payload){
+                guard_t guard;
+                dfu::doSetPrn(ctrlWriter, payload);
+            }>,
+            blex_binary_command::Command<protocol::CALCULATE_CRC, [] {
+                guard_t guard;
+                dfu::doCalculateCrc(ctrlWriter);
+            }>,
+            blex_binary_command::Command<protocol::EXECUTE_OBJECT, [] {
+                guard_t guard;
+                dfu::doExecuteObject(ctrlWriter);
+            }>,
+            blex_binary_command::Command<protocol::SELECT_OBJECT, [](const protocol::select_object_payload_t& payload) {
+                guard_t guard;
+                dfu::doSelectObject(ctrlWriter, payload);
+            }>,
+            blex_binary_command::Fallback<[](uint8_t opcode, blex_binary_command::DispatchError error) {
+                guard_t guard;
+                dfu::doDispatchError(ctrlWriter, opcode, error);
+            }>
         >;
 
-        // DFU Data - UUID moved to ota.cpp to prevent template instantiation
-        using DataChar = typename Blex::template Characteristic<
-            std::vector<uint8_t>,
-            ota_uuids::DFU_DATA_UUID_STR,
-            typename Perms::AllowWriteNoResponse,
-            typename CharCallbacks::template WithOnWrite<onWriteData>
-        >;
+            /**
+             * @brief Data characteristic write handler - raw firmware bytes
+             */
+            static void onWriteData(const uint8_t* data, const size_t len) {
+                guard_t guard;
+                dfu::handle_write_data(ctrlWriter, data, len);
+            }
+        public:
+            /**
+             * @brief DFU Control Characteristic
+             * @details Receives commands (RX dispatch), sends responses via notification
+             *
+             * Buffer type: C array sized from dfu_command_dispatcher::max_message_size
+             */
+            using CtrlChar = Blex::template Characteristic<
+                typename command_dispatcher::buffer_type,
+                uuids::DFU_CTRL,
+                typename Perms::AllowWrite::AllowNotify,
+                typename CharCallbacks::template WithOnWrite<command_dispatcher::dispatch>
+            >;
+
+            /**
+             * @brief DFU Data Characteristic
+             * @details Receives raw firmware data chunks (no opcode, no protocol dispatch)
+             *
+             * Buffer type: Fixed 512-byte C array (max BLE packet size)
+             */
+            using DataChar = Blex::template Characteristic<
+                uint8_t[MAX_DATA_CHUNK_SIZE],
+                uuids::DFU_DATA,
+                typename Perms::AllowWriteNoResponse,
+                typename CharCallbacks::template WithOnWrite<onWriteData>
+            >;
+        };
+    }  // namespace detail
+
+    /// Suppress -Wsubobject-linkage: lambdas in template parameters create anonymous namespace types.
+    /// Safe here: header-only design with single translation unit ensures no ODR violations.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsubobject-linkage"
+    template<typename Blex, typename C = detail::OtaServiceImpl<Blex> >
+    struct OtaService : C, Blex::template Service<
+        0xFE59,
+        typename C::CtrlChar, typename C::DataChar
+    > {
     };
-}
-
-template<typename Blex, typename C = detail::OtaServiceImpl<Blex> >
-struct OtaService : C, Blex::template Service<
-    0xFE59,
-    typename C::CtrlChar, typename C::DataChar
-> {
-};
+#pragma GCC diagnostic pop
+}  // namespace ota
 
 #endif
 

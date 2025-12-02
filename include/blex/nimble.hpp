@@ -157,6 +157,51 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
         return pService ? pService->isStarted() : false;
     }
 
+    /**
+     * @brief Request connection parameter update for all connected peers
+     * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+     * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+     * @param latency Slave latency (number of connection events to skip, 0-499)
+     * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+     * @return true if request sent to at least one peer, false otherwise
+     */
+    static bool updateConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                        uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+        if (!pService) return false;
+        NimBLEServer* server = pService->getServer();
+        if (!server) return false;
+
+        auto peers = server->getPeerDevices();
+        if (peers.empty()) return false;
+
+        for (auto handle : peers) {
+            server->updateConnParams(handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+        return true;
+    }
+
+    /**
+     * @brief Get current connection parameters for first connected peer
+     * @param[out] min_interval_ms Current minimum interval (in 1.25ms units from BLE, converted to ms)
+     * @param[out] max_interval_ms Current maximum interval (in 1.25ms units from BLE, converted to ms)
+     * @return true if parameters retrieved, false if no connection
+     */
+    static bool getConnectionParams(uint16_t& min_interval_ms, uint16_t& max_interval_ms) {
+        if (!pService) return false;
+        NimBLEServer* server = pService->getServer();
+        if (!server) return false;
+
+        auto peers = server->getPeerDevices();
+        if (peers.empty()) return false;
+
+        // Get first peer's connection info
+        NimBLEConnInfo connInfo = server->getPeerInfo(peers[0]);
+        // NimBLE returns interval in 1.25ms units, convert to ms
+        uint16_t interval = connInfo.getConnInterval();
+        min_interval_ms = max_interval_ms = (interval * 125) / 100;  // 1.25ms units to ms
+        return true;
+    }
+
 private:
     /**
      * @brief Helper to register all characteristics (directly to backends)
@@ -204,12 +249,12 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
 
     /**
      * @brief NimBLE callback adapter (nested inside backend)
-     * @tparam LockPolicy Lock implementation (FreeRTOSLock for multi-core, NoLock for single-core)
+     * @tparam LockPolicy Lock implementation (FreeRTOSLock for multicore, NoLock for single-core)
      */
     template<template<typename> class LockPolicy>
     struct Shim final : NimBLECharacteristicCallbacks {
         // Per-characteristic scope lock
-        using guard_t = typename blex_sync::template ScopedLock<LockPolicy, Base>;
+        using guard_t = blex_sync::ScopedLock<LockPolicy, Base>;
 
         // Determine if we should use read+notify optimization
         static constexpr bool use_read_notify_optimization =
@@ -232,19 +277,31 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
 
     private:
         // Internal setValue without locking - accesses outer pChar directly
-        static void setValue_unsafe(const typename Base::value_type& newValue) {
-            using ValueT = typename Base::value_type;
+        static void setValue_unsafe(const Base::value_type& newValue) {
+            using ValueT = Base::value_type;
             if (auto* p = pChar) {  // Access outer scope pChar
-                if constexpr (Base::perms_type::canNotify && !Base::perms_type::canRead) {
-                    // Direct notify without storing value
+                if constexpr ((Base::perms_type::canNotify || Base::perms_type::canIndicate) && !Base::perms_type::canRead) {
+                    // Direct notify/indicate without storing value
                     if constexpr (std::is_same_v<ValueT, std::string>) {
-                        p->notify(reinterpret_cast<const uint8_t*>(newValue.data()), newValue.size());
+                        if constexpr (Base::perms_type::canIndicate) {
+                            p->indicate(reinterpret_cast<const uint8_t*>(newValue.data()), newValue.size());
+                        } else {
+                            p->notify(reinterpret_cast<const uint8_t*>(newValue.data()), newValue.size());
+                        }
                     } else if constexpr (std::is_same_v<ValueT, std::vector<uint8_t>>) {
-                        p->notify(newValue.data(), newValue.size());
+                        if constexpr (Base::perms_type::canIndicate) {
+                            p->indicate(newValue.data(), newValue.size());
+                        } else {
+                            p->notify(newValue.data(), newValue.size());
+                        }
                     } else {
                         std::array<uint8_t, sizeof(ValueT)> buf{};
                         std::memcpy(buf.data(), &newValue, sizeof(ValueT));
-                        p->notify(buf.data(), buf.size());
+                        if constexpr (Base::perms_type::canIndicate) {
+                            p->indicate(buf.data(), buf.size());
+                        } else {
+                            p->notify(buf.data(), buf.size());
+                        }
                     }
                 } else {
                     // Characteristic is readable: must store value
@@ -258,7 +315,9 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                         p->setValue(buf.data(), buf.size());
                     }
 
-                    if constexpr (Base::perms_type::canNotify) {
+                    if constexpr (Base::perms_type::canIndicate) {
+                        p->indicate();
+                    } else if constexpr (Base::perms_type::canNotify) {
                         p->notify();
                     }
                 }
@@ -271,11 +330,18 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
 
         static void setValue_unsafe(const uint8_t* data, size_t size) {
             if (auto* p = pChar) {  // Access outer scope pChar
-                if constexpr (Base::perms_type::canNotify && !Base::perms_type::canRead) {
-                    p->notify(data, size);
+                if constexpr ((Base::perms_type::canNotify || Base::perms_type::canIndicate) && !Base::perms_type::canRead) {
+                    // Direct notify/indicate without storing value
+                    if constexpr (Base::perms_type::canIndicate) {
+                        p->indicate(data, size);
+                    } else {
+                        p->notify(data, size);
+                    }
                 } else {
                     p->setValue(data, size);
-                    if constexpr (Base::perms_type::canNotify) {
+                    if constexpr (Base::perms_type::canIndicate) {
+                        p->indicate();
+                    } else if constexpr (Base::perms_type::canNotify) {
                         p->notify();
                     }
                 }
@@ -325,10 +391,20 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                 if constexpr (std::is_same_v<typename Base::value_type, std::string> ||
                               std::is_same_v<typename Base::value_type, std::vector<uint8_t>>) {
                     Base::WriteHandler(pChar->getValue());
+                } else if constexpr (std::is_array_v<typename Base::value_type> &&
+                                     std::is_same_v<std::remove_extent_t<typename Base::value_type>, uint8_t>) {
+                    // uint8_t[N] buffer type: pass raw (ptr, size)
+                    const auto& data = pChar->getValue();
+                    static_assert(std::is_same_v<std::decay_t<decltype(data)>, NimBLEAttValue>,
+                        "Expected NimBLEAttValue from getValue()");
+                    Base::WriteHandler(data.data(), data.size());
                 } else {
                     const auto& data = pChar->getValue();
-                    assert(data.size() >= sizeof(typename Base::value_type) &&
-                           "BLE write data size mismatch");
+                    if (data.size() < sizeof(typename Base::value_type)) {
+                        BLEX_LOG_ERROR("BLE write ignored due to size mismatch: got %u, expected %u\n",
+                                      (unsigned)data.size(), (unsigned)sizeof(typename Base::value_type));
+                        return;  // Silently ignore malformed writes
+                    }
                     typename Base::value_type val;
                     std::memcpy(&val, data.data(), sizeof(typename Base::value_type));
                     Base::WriteHandler(val);
@@ -336,12 +412,24 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             }
         }
 
-        void onStatus([[maybe_unused]] NimBLECharacteristic* pChar, [[maybe_unused]] int code) override {
+        // Override onStatus: NimBLE base requires NimBLEConnInfo& param (unused in handler)
+        void onStatus([[maybe_unused]] NimBLECharacteristic* pChar,
+                      [[maybe_unused]] NimBLEConnInfo& connInfo,
+                      [[maybe_unused]] int code) override {
             if constexpr (Base::StatusHandler != nullptr) {
                 Base::StatusHandler(code);
             }
         }
 
+    private:
+        // Override deprecated 2-param onStatus as private to prevent hiding warning.
+        // NimBLE deprecated this signature in favor of 3-param version with NimBLEConnInfo&.
+        void onStatus([[maybe_unused]] NimBLECharacteristic* pChar,
+                      [[maybe_unused]] int code) override {
+            // Deprecated - do nothing. Use 3-param version above.
+        }
+
+    public:
         void onSubscribe(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo, uint16_t subValue) override {
             if constexpr (use_read_notify_optimization) {
                 if (subValue == 0) {
@@ -946,6 +1034,31 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
     }
 
     // ---------------------- Runtime Configuration ----------------------
+
+    /**
+     * @brief Request connection parameter update for all connected peers
+     * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+     * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+     * @param latency Slave latency (number of connection events to skip, 0-499)
+     * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+     * @return true if request sent to at least one peer, false if no connections or server not initialized
+     * @note The central (phone/computer) may reject or modify these parameters
+     */
+    static bool updateConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                        uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+        if (!server) return false;
+
+        auto peers = server->getPeerDevices();
+        if (peers.empty()) return false;
+
+        for (auto handle : peers) {
+            server->updateConnParams(handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+
+        BLEX_LOG_INFO("Requested connection params: interval=%u-%ums, latency=%u, timeout=%ums\n",
+                      min_interval_ms, max_interval_ms, latency, timeout_ms);
+        return true;
+    }
 
     /**
      * @brief Set TX power at runtime (validates against hardware limits)

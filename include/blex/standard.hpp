@@ -563,7 +563,7 @@ namespace chars {
 
     /**
      * Manufacturer Name String (0x2A29)
-     * Represents the name of the manufacturer of the device
+     * Represents the name of a device manufacturer
      */
     template<const char* MfgName>
     using ManufacturerName = ::ConstCharacteristic<const char*, static_cast<uint16_t>(0x2A29), MfgName>;

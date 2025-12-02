@@ -64,26 +64,32 @@
   #if defined(BLEX_DISABLE_LOGGING) || defined(BLEX_LOG_LEVEL_NONE)
     #undef BLEX_LOG_LEVEL
     #define BLEX_LOG_LEVEL 0
+    #undef BLEX_LOG_LEVEL_NONE
   #endif
   #ifdef BLEX_LOG_LEVEL_ERROR
     #undef BLEX_LOG_LEVEL
     #define BLEX_LOG_LEVEL 1
+    #undef BLEX_LOG_LEVEL_ERROR
   #endif
   #ifdef BLEX_LOG_LEVEL_WARN
     #undef BLEX_LOG_LEVEL
     #define BLEX_LOG_LEVEL 2
+    #undef BLEX_LOG_LEVEL_WARN
   #endif
   #ifdef BLEX_LOG_LEVEL_INFO
     #undef BLEX_LOG_LEVEL
     #define BLEX_LOG_LEVEL 3
+    #undef BLEX_LOG_LEVEL_INFO
   #endif
   #ifdef BLEX_LOG_LEVEL_DEBUG
     #undef BLEX_LOG_LEVEL
     #define BLEX_LOG_LEVEL 4
+    #undef BLEX_LOG_LEVEL_DEBUG
   #endif
   #ifdef BLEX_LOG_LEVEL_TRACE
     #undef BLEX_LOG_LEVEL
     #define BLEX_LOG_LEVEL 5
+    #undef BLEX_LOG_LEVEL_TRACE
   #endif
 #endif
 

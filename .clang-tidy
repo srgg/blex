@@ -1,0 +1,6 @@
+# Avionix Project - Clang-Tidy Configuration
+# Aligned with coding standards: C++20 (draft 2a), no exceptions, snake_case/PascalCase naming
+---
+
+# Using Google C++ Style Guide ruleset
+Checks: 'google-*'

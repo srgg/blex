@@ -101,8 +101,9 @@ using MyDevice = MyBlex::Server<
 
     // Connection Configuration
     MyBlex::ConnectionConfig<>
-        ::WithMTU<247>                      // MTU: 247 bytes
-        ::WithIntervals<100, 200>           // Connection: 100-200ms
+        ::WithMTU<517>                      // MTU: 517 bytes (BLE 4.2+ max)
+        // ::WithIntervals<100, 200>        // Connection: 100-200ms (slow, not for OTA)
+        ::WithIntervals<8, 15>              // Connection: 8-15ms (fast for OTA, 7.5ms is BLE min)
         ::WithTimeout<4000>,                // Timeout: 4s
 
     // Server Callbacks
@@ -111,7 +112,8 @@ using MyDevice = MyBlex::Server<
         ::WithOnDisconnect<onDisconnect>,
 
     // Services
-    MyBlex::PassiveAdvService<DeviceInfoService<MyBlex>>,
+    MyBlex::PassiveAdvService<DeviceInfoService<MyBlex>>,       // out-of-the-box Device Info service
+    MyBlex::ActiveAdvService<ota::OtaService<MyBlex>>,          // out-of-the-box OTA/DFY service
     MyBlex::ActiveAdvService<EnvironmentalService>
 >;
 
@@ -145,21 +147,22 @@ void loop() {
     temperature += change;
     temperature = constrain(temperature, TEMP_MIN, TEMP_MAX);
 
-    // Notify connected clients
-    if (MyDevice::isConnected()) {
-        TempChar::setValue(temperature);
-        Serial.printf("Temperature updated: %.1f°C\n", temperature);
-    }
-
-    // Print active connections
-    const auto connections = MyDevice::getConnections();
-    Serial.printf("\nActive connections: %u\n", connections.size());
-    for (const auto& conn : connections) {
-        Serial.printf("  - %s (RSSI: %d dBm)\n",
-                      conn.getAddress().toString().c_str(),
-                      MyDevice::getRSSI(conn.getConnHandle()));
-    }
-    Serial.println();
-
-    delay(UPDATE_INTERVAL_MS);
+    // // Notify connected clients
+    // if (MyDevice::isConnected()) {
+    //     TempChar::setValue(temperature);
+    //     Serial.printf("Temperature updated: %.1f°C\n", temperature);
+    // }
+    //
+    // // Print active connections
+    // const auto connections = MyDevice::getConnections();
+    // Serial.printf("\nActive connections: %u\n", connections.size());
+    // for (const auto& conn : connections) {
+    //     Serial.printf("  - %s (RSSI: %d dBm)\n",
+    //                   conn.getAddress().toString().c_str(),
+    //                   MyDevice::getRSSI(conn.getConnHandle()));
+    // }
+    // Serial.println();
+    //Let
+    // delay(UPDATE_INTERVAL_MS);
+    delay(1);
 }
