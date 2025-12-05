@@ -51,6 +51,92 @@ namespace blex_nimble {
 
 #ifdef BLEX_NIMBLE_AVAILABLE
 
+/**
+ * @brief Runtime storage for server's default connection parameters
+ * @details Initialized by ServerBackend::init() from ConnectionConfig template params.
+ *          Services can restore these defaults without knowing the Server type.
+ */
+struct DefaultConnectionParams {
+    uint16_t interval_min_ms = 100;   ///< Default min interval (100ms)
+    uint16_t interval_max_ms = 200;   ///< Default max interval (200ms)
+    uint16_t latency = 0;             ///< Default slave latency
+    uint16_t timeout_ms = 4000;       ///< Default supervision timeout (4s)
+    bool initialized = false;         ///< True after server sets values
+};
+
+/// Global instance - set by ServerBackend::init(), read by services
+inline DefaultConnectionParams g_default_conn_params{};
+
+/**
+ * @brief Update connection parameters for a specific peer (shared implementation)
+ * @param server NimBLE server pointer
+ * @param conn_handle Connection handle to update
+ * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+ * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+ * @param latency Slave latency (number of connection events to skip, 0-499)
+ * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+ * @return true if request sent, false if server null
+ */
+inline bool updateConnectionParams(NimBLEServer* server, uint16_t conn_handle,
+                                    uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                    uint16_t latency, uint16_t timeout_ms) {
+    if (!server) return false;
+    server->updateConnParams(conn_handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+    return true;
+}
+
+/**
+ * @brief Update connection parameters for all connected peers (shared implementation)
+ * @param server NimBLE server pointer
+ * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+ * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+ * @param latency Slave latency (number of connection events to skip, 0-499)
+ * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+ * @return true if request sent to at least one peer, false if server null or no peers
+ */
+inline bool updateAllConnectionParams(NimBLEServer* server,
+                                       uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                       uint16_t latency, uint16_t timeout_ms) {
+    if (!server) return false;
+
+    auto peers = server->getPeerDevices();
+    if (peers.empty()) return false;
+
+    for (auto handle : peers) {
+        server->updateConnParams(handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+    }
+    return true;
+}
+
+/**
+ * @brief Restore default connection parameters (shared implementation)
+ * @param server NimBLE server pointer
+ * @param conn_handle Connection handle to update
+ * @return true if request sent, false if server null or defaults not initialized
+ */
+inline bool restoreDefaultConnectionParams(NimBLEServer* server, uint16_t conn_handle) {
+    if (!server) return false;
+    if (!g_default_conn_params.initialized) {
+        BLEX_LOG_WARN("No default connection params available - server may not have ConnectionConfig\n");
+        return false;
+    }
+
+    server->updateConnParams(
+        conn_handle,
+        g_default_conn_params.interval_min_ms,
+        g_default_conn_params.interval_max_ms,
+        g_default_conn_params.latency,
+        g_default_conn_params.timeout_ms
+    );
+
+    BLEX_LOG_INFO("Restored default connection params: interval=%u-%ums, latency=%u, timeout=%ums\n",
+        g_default_conn_params.interval_min_ms,
+        g_default_conn_params.interval_max_ms,
+        g_default_conn_params.latency,
+        g_default_conn_params.timeout_ms);
+    return true;
+}
+
 // Helper to create NimBLEUUID
 template<auto uuid>
 static NimBLEUUID make_uuid() {
@@ -133,13 +219,9 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
      * @return true if successful, false if service not found
      */
     static bool stop() {
-        if (!pService) {
-            BLEX_LOG_ERROR("Service not registered (pService is null)\n");
-            return false;
-        }
-        NimBLEServer* server = pService->getServer();
+        NimBLEServer* server = getServer();
         if (!server) {
-            BLEX_LOG_ERROR("Server not initialized for service\n");
+            BLEX_LOG_ERROR("Service or server not initialized\n");
             return false;
         }
 
@@ -158,6 +240,20 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
     }
 
     /**
+     * @brief Request connection parameter update for a specific connection
+     * @param conn_handle BLE connection handle
+     * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+     * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+     * @param latency Slave latency (number of connection events to skip, 0-499)
+     * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+     * @return true if request sent, false if service/server not initialized
+     */
+    static bool updateConnectionParams(uint16_t conn_handle, uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                        uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+        return blex_nimble::updateConnectionParams(getServer(), conn_handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+    }
+
+    /**
      * @brief Request connection parameter update for all connected peers
      * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
      * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
@@ -165,30 +261,39 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
      * @param timeout_ms Supervision timeout in milliseconds (100-32000)
      * @return true if request sent to at least one peer, false otherwise
      */
-    static bool updateConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
-                                        uint16_t latency = 0, uint16_t timeout_ms = 4000) {
-        if (!pService) return false;
-        NimBLEServer* server = pService->getServer();
-        if (!server) return false;
-
-        auto peers = server->getPeerDevices();
-        if (peers.empty()) return false;
-
-        for (auto handle : peers) {
-            server->updateConnParams(handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
-        }
-        return true;
+    static bool updateAllConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                           uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+        return blex_nimble::updateAllConnectionParams(getServer(), min_interval_ms, max_interval_ms, latency, timeout_ms);
     }
 
     /**
-     * @brief Get current connection parameters for first connected peer
+     * @brief Restore default connection parameters from server's ConnectionConfig
+     * @param conn_handle Connection handle to update
+     * @return true if request sent, false if server not initialized or no ConnectionConfig
+     * @note Uses global g_default_conn_params set by ServerBackend::init()
+     */
+    static bool restoreDefaultConnectionParams(uint16_t conn_handle) {
+        NimBLEServer* server = getServer();
+        return blex_nimble::restoreDefaultConnectionParams(server, conn_handle);
+    }
+
+private:
+    /// @brief Get NimBLE server from service
+    static NimBLEServer* getServer() {
+        if (!pService) return nullptr;
+        return pService->getServer();
+    }
+
+public:
+
+    /**
+     * @brief Get current connection parameters for the first connected peer
      * @param[out] min_interval_ms Current minimum interval (in 1.25ms units from BLE, converted to ms)
      * @param[out] max_interval_ms Current maximum interval (in 1.25ms units from BLE, converted to ms)
      * @return true if parameters retrieved, false if no connection
      */
     static bool getConnectionParams(uint16_t& min_interval_ms, uint16_t& max_interval_ms) {
-        if (!pService) return false;
-        NimBLEServer* server = pService->getServer();
+        NimBLEServer* server = getServer();
         if (!server) return false;
 
         auto peers = server->getPeerDevices();
@@ -388,16 +493,32 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
 
         void onWrite(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
             if constexpr (Base::WriteHandler != nullptr) {
+                // Detect if WriteHandler accepts ConnectionInfo parameter
+                constexpr bool wants_conn_info_value =
+                    std::is_invocable_v<decltype(Base::WriteHandler), const typename Base::value_type&, NimBLEConnInfo&>;
+                constexpr bool wants_conn_info_buffer =
+                    std::is_array_v<typename Base::value_type> &&
+                    std::is_same_v<std::remove_extent_t<typename Base::value_type>, uint8_t> &&
+                    std::is_invocable_v<decltype(Base::WriteHandler), const uint8_t*, size_t, NimBLEConnInfo&>;
+
                 if constexpr (std::is_same_v<typename Base::value_type, std::string> ||
                               std::is_same_v<typename Base::value_type, std::vector<uint8_t>>) {
-                    Base::WriteHandler(pChar->getValue());
+                    if constexpr (wants_conn_info_value) {
+                        Base::WriteHandler(pChar->getValue(), connInfo);
+                    } else {
+                        Base::WriteHandler(pChar->getValue());
+                    }
                 } else if constexpr (std::is_array_v<typename Base::value_type> &&
                                      std::is_same_v<std::remove_extent_t<typename Base::value_type>, uint8_t>) {
-                    // uint8_t[N] buffer type: pass raw (ptr, size)
+                    // uint8_t[N] buffer type: pass raw (ptr, size) with optional connInfo
                     const auto& data = pChar->getValue();
                     static_assert(std::is_same_v<std::decay_t<decltype(data)>, NimBLEAttValue>,
                         "Expected NimBLEAttValue from getValue()");
-                    Base::WriteHandler(data.data(), data.size());
+                    if constexpr (wants_conn_info_buffer) {
+                        Base::WriteHandler(data.data(), data.size(), connInfo);
+                    } else {
+                        Base::WriteHandler(data.data(), data.size());
+                    }
                 } else {
                     const auto& data = pChar->getValue();
                     if (data.size() < sizeof(typename Base::value_type)) {
@@ -407,7 +528,11 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                     }
                     typename Base::value_type val;
                     std::memcpy(&val, data.data(), sizeof(typename Base::value_type));
-                    Base::WriteHandler(val);
+                    if constexpr (wants_conn_info_value) {
+                        Base::WriteHandler(val, connInfo);
+                    } else {
+                        Base::WriteHandler(val);
+                    }
                 }
             }
         }
@@ -444,7 +569,15 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             }
 
             if constexpr (Base::SubscribeHandler != nullptr) {
-                Base::SubscribeHandler(subValue);
+                // Detect if SubscribeHandler accepts ConnectionInfo parameter
+                constexpr bool wants_conn_info =
+                    std::is_invocable_v<decltype(Base::SubscribeHandler), uint16_t, NimBLEConnInfo&>;
+
+                if constexpr (wants_conn_info) {
+                    Base::SubscribeHandler(subValue, connInfo);
+                } else {
+                    Base::SubscribeHandler(subValue);
+                }
             }
         }
     };
@@ -594,7 +727,53 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
         return pC;
     }
 
+    /**
+     * @brief Update BLE connection parameters for a specific connection
+     * @param conn_handle Connection handle to update
+     * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+     * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+     * @param latency Slave latency (number of connection events to skip, 0-499)
+     * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+     * @return true if request sent, false if characteristic/service/server not initialized
+     */
+    static bool updateConnectionParams(uint16_t conn_handle, uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                        uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+        return blex_nimble::updateConnectionParams(getServer(), conn_handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+    }
+
+    /**
+     * @brief Update BLE connection parameters for all connected peers
+     * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+     * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+     * @param latency Slave latency (number of connection events to skip, 0-499)
+     * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+     * @return true if request sent to at least one peer, false if no connections or not initialized
+     */
+    static bool updateAllConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                           uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+        return blex_nimble::updateAllConnectionParams(getServer(), min_interval_ms, max_interval_ms, latency, timeout_ms);
+    }
+
+    /**
+     * @brief Restore default connection parameters from server's ConnectionConfig
+     * @param conn_handle Connection handle to update
+     * @return true if request sent, false if not initialized or no ConnectionConfig
+     * @note Uses global g_default_conn_params set by ServerBackend::init()
+     */
+    static bool restoreDefaultConnectionParams(uint16_t conn_handle) {
+        NimBLEServer* server = getServer();
+        return blex_nimble::restoreDefaultConnectionParams(server, conn_handle);
+    }
+
 private:
+    /// @brief Get NimBLE server from characteristic's service
+    static NimBLEServer* getServer() {
+        if (!pChar) return nullptr;
+        NimBLEService* svc = pChar->getService();
+        if (!svc) return nullptr;
+        return svc->getServer();
+    }
+
     /**
      * @brief Helper to register all descriptors (passes full descriptor types for proper backend specialization)
      */
@@ -814,6 +993,19 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
                 }
             }
         }
+
+        void onConnParamsUpdate(NimBLEConnInfo& connInfo) override {
+            if constexpr (is_handler_provided<Config::ConnParamsUpdateHandler>) {
+                Config::ConnParamsUpdateHandler(connInfo);
+            } else {
+                // Default: log the new connection parameters
+                BLEX_LOG_INFO("Connection params updated for %s: interval=%.2fms, latency=%u, timeout=%ums\n",
+                    connInfo.getAddress().toString().c_str(),
+                    connInfo.getConnInterval() * 1.25f,
+                    connInfo.getConnLatency(),
+                    connInfo.getConnTimeout() * 10);
+            }
+        }
     };
 
     // ---------------------- Initialization ----------------------
@@ -859,6 +1051,18 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
                 NimBLEDevice::setMTU(Config::ConnConfig::mtu);
                 BLEX_LOG_DEBUG("init: MTU is set to %u\n", Config::ConnConfig::mtu);
             }
+
+            // Store default connection params for services to restore later
+            blex_nimble::g_default_conn_params.interval_min_ms = Config::ConnConfig::conn_interval_min_ms;
+            blex_nimble::g_default_conn_params.interval_max_ms = Config::ConnConfig::conn_interval_max_ms;
+            blex_nimble::g_default_conn_params.latency = Config::ConnConfig::conn_latency;
+            blex_nimble::g_default_conn_params.timeout_ms = Config::ConnConfig::supervision_timeout_ms;
+            blex_nimble::g_default_conn_params.initialized = true;
+            BLEX_LOG_DEBUG("init: default connection params stored: interval=%u-%ums, latency=%u, timeout=%ums\n",
+                blex_nimble::g_default_conn_params.interval_min_ms,
+                blex_nimble::g_default_conn_params.interval_max_ms,
+                blex_nimble::g_default_conn_params.latency,
+                blex_nimble::g_default_conn_params.timeout_ms);
         }
 
         // Configure BLE security if user provided SecurityConfig
@@ -1036,6 +1240,23 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
     // ---------------------- Runtime Configuration ----------------------
 
     /**
+     * @brief Request connection parameter update for a specific connection
+     * @param conn_handle Connection handle to update
+     * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+     * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+     * @param latency Slave latency (number of connection events to skip, 0-499)
+     * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+     * @return true if request sent, false if server not initialized
+     * @note The central (phone/computer) may reject or modify these parameters
+     */
+    static bool updateConnectionParams(uint16_t conn_handle, uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                        uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+        if (!server) return false;
+        server->updateConnParams(conn_handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+        return true;
+    }
+
+    /**
      * @brief Request connection parameter update for all connected peers
      * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
      * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
@@ -1044,8 +1265,8 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
      * @return true if request sent to at least one peer, false if no connections or server not initialized
      * @note The central (phone/computer) may reject or modify these parameters
      */
-    static bool updateConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
-                                        uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+    static bool updateAllConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                           uint16_t latency = 0, uint16_t timeout_ms = 4000) {
         if (!server) return false;
 
         auto peers = server->getPeerDevices();
@@ -1058,6 +1279,34 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
         BLEX_LOG_INFO("Requested connection params: interval=%u-%ums, latency=%u, timeout=%ums\n",
                       min_interval_ms, max_interval_ms, latency, timeout_ms);
         return true;
+    }
+
+    /**
+     * @brief Restore default connection parameters from server's ConnectionConfig
+     * @param conn_handle Connection handle to update
+     * @return true if request sent, false if server not initialized or no ConnectionConfig
+     * @note Uses compile-time ConnectionConfig values - no runtime state needed
+     */
+    static bool restoreDefaultConnectionParams(uint16_t conn_handle) {
+        if constexpr (std::is_void_v<typename Config::ConnConfig>) {
+            BLEX_LOG_WARN("No ConnectionConfig defined - cannot restore default params\n");
+            return false;
+        } else {
+            if (!server) return false;
+
+            server->updateConnParams(
+                conn_handle,
+                Config::ConnConfig::conn_interval_min,
+                Config::ConnConfig::conn_interval_max,
+                Config::ConnConfig::conn_latency,
+                Config::ConnConfig::supervision_timeout
+            );
+
+            BLEX_LOG_INFO("Restoring default connection params: interval=%u-%ums, latency=%u, timeout=%ums\n",
+                Config::ConnConfig::conn_interval_min_ms, Config::ConnConfig::conn_interval_max_ms,
+                Config::ConnConfig::conn_latency, Config::ConnConfig::supervision_timeout_ms);
+            return true;
+        }
     }
 
     /**

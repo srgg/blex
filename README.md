@@ -88,12 +88,10 @@ void loop() {
 See the `examples/` directory for complete working examples:
 
 - **[basic_server](examples/basic_server/)** - Minimal BLE server setup (start here!)
-- **[custom_service](examples/)** - Creating your own custom BLE services
-- **[ota_update](examples/)** - Over-the-air firmware updates via BLE
-- **[multi_service](examples/)** - Multiple services with different characteristics
+- **[simple_server](examples/simple_server/)** - Simple server with custom characteristics
 - **[imu_streamer](examples/imu_streamer/)** - High-frequency sensor data streaming
 
-Each example includes complete source code and detailed README with explanations.
+Each example includes complete source code with inline documentation.
 
 ## Understanding BLEX
 
@@ -136,7 +134,30 @@ BLEX provides ready-to-use standard BLE services:
 
 See [Built-in Services Documentation](docs/built-in-services.md) for details.
 
-#### 4. Service Visibility
+#### 4. Binary Command Dispatcher
+
+For implementing binary protocols over BLE characteristics, BLEX includes a zero-allocation command dispatcher:
+
+- **Opcode-based dispatch** - Route commands by opcode to typed handlers
+- **Compile-time validation** - Payload sizes and alignment checked at compile time
+- **Zero heap allocation** - Static buffers sized automatically from command definitions
+
+```cpp
+#include <blex/binary_command.hpp>
+
+using MyDispatcher = blex_binary_command::Dispatcher<
+    blex_binary_command::Command<0x01, [](const CreatePayload& p) { /* handle */ }>,
+    blex_binary_command::Command<0x02, [](const QueryPayload& p) { /* handle */ }>,
+    blex_binary_command::Fallback<[](uint8_t opcode, auto error) { /* handle unknown */ }>
+>;
+
+// In characteristic write handler:
+MyDispatcher::dispatch(data, len);
+```
+
+See `services/ota.hpp` for a complete usage example (Nordic DFU protocol implementation).
+
+#### 5. Service Visibility
 
 Control how services are advertised to central devices:
 
@@ -250,6 +271,28 @@ MyServer::updateAdvertising();        // Stop, reconfigure, restart
 ```
 
 **Note:** Runtime changes to advertising parameters override compile-time configuration.
+
+### Connection Parameters
+
+Request BLE connection parameter updates at runtime:
+
+```cpp
+// Request connection parameter update for a specific peer
+MyServer::updateConnectionParams(conn_handle, 8, 15, 0, 4000);  // min/max interval (ms), latency, timeout
+
+// Request connection parameter update for all connected peers
+MyServer::updateAllConnectionParams(8, 15, 0, 4000);
+
+// Restore default parameters (from ConnectionConfig)
+MyServer::restoreDefaultConnectionParams(conn_handle);
+```
+
+**Available on:** `Server`, `Service`, and `Characteristic` types.
+
+**Important:** These are *requests* to the central device. The central controls connection parameters and may ignore or modify the requested values. Behavior varies by platform:
+- **Linux**: Generally honors peripheral requests
+- **macOS/iOS**: Often ignores peripheral requests; central controls intervals
+- **Android**: Usually honors requests within allowed ranges
 
 ### Device Naming
 
@@ -365,12 +408,34 @@ SecurityConfig<>
 ServerCallbacks<>
     ::WithOnConnect<onConnect>
     ::WithOnDisconnect<onDisconnect>
+    ::WithOnMTUChange<onMTUChange>
+    ::WithOnConnParamsUpdate<onConnParamsUpdate>
 ```
 
 **Callback signatures:**
 ```cpp
 void onConnect(NimBLEConnInfo& conn);
 void onDisconnect(NimBLEConnInfo& conn, int reason);
+void onMTUChange(uint16_t mtu, NimBLEConnInfo& conn);
+void onConnParamsUpdate(NimBLEConnInfo& conn);
+```
+
+### CharacteristicCallbacks
+
+```cpp
+CharacteristicCallbacks<>
+    ::WithOnRead<onRead>
+    ::WithOnWrite<onWrite>
+    ::WithOnStatus<onStatus>
+    ::WithOnSubscribe<onSubscribe>
+```
+
+**Callback signatures:**
+```cpp
+void onRead(NimBLEConnInfo& conn);
+void onWrite(const ValueType& value, NimBLEConnInfo& conn);  // or raw: (const uint8_t* data, size_t len, NimBLEConnInfo& conn)
+void onStatus(NimBLECharacteristic* pChar, int code);
+void onSubscribe(uint16_t subValue, NimBLEConnInfo& conn);
 ```
 
 ## Architecture
@@ -378,6 +443,42 @@ void onDisconnect(NimBLEConnInfo& conn, int reason);
 BLEX follows a layered architecture with clean separation of concerns. Each layer has well-defined responsibilities and interfaces, enabling maintainability, testability, and potential backend portability.
 
 See [Architecture Documentation](docs/architecture.md) for detailed layer descriptions, design patterns, extension points, and performance considerations.
+
+## Troubleshooting
+
+### Compilation errors: "need 'typename' before dependent type"
+
+**Symptom:** Build fails with errors like:
+```
+.pio/libdeps/.../blex/include/blex/core.hpp:121:18: error: need 'typename' before 'T::service_type'
+because 'T' is a dependent scope
+    using type = T::service_type;
+                 ^
+```
+
+**Cause:** BLEX requires GCC 12+ which relaxes `typename` requirements (C++20 P0634R3). The default ESP32 toolchain (GCC 8.4) doesn't support this.
+
+**Verify toolchain version:**
+```bash
+~/.platformio/packages/toolchain-xtensa-esp32s3/bin/xtensa-esp32s3-elf-g++ --version 2>/dev/null || echo "Toolchain not found"
+# Expected: xtensa-esp32s3-elf-g++ (crosstool-NG esp-12.2.0_20230208) 12.2.0
+```
+
+**Fix:** Add `platform_packages` to your `platformio.ini`:
+
+```ini
+[env]
+platform = espressif32
+
+; ESP32-S3
+platform_packages = toolchain-xtensa-esp32s3 @ 12.2.0
+
+; ESP32 (original)
+; platform_packages = toolchain-xtensa-esp32 @ 12.2.0
+
+; ESP32-C3 (RISC-V)
+; platform_packages = toolchain-riscv32-esp @ 12.2.0
+```
 
 ## Development
 
