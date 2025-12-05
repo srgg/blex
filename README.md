@@ -480,6 +480,25 @@ platform_packages = toolchain-xtensa-esp32s3 @ 12.2.0
 ; platform_packages = toolchain-riscv32-esp @ 12.2.0
 ```
 
+### OTA upload: "one of the arguments -d/--device -n/--name is required"
+
+**Cause:** No target device specified for BLE OTA upload.
+
+**Fix:** Pass device via environment variable:
+```bash
+PLATFORMIO_UPLOAD_FLAGS="-d aa:bb:cc:dd:ee:ff" pio run -e ota_server -t upload
+# Or by name:
+PLATFORMIO_UPLOAD_FLAGS="-n DeviceName" pio run -e ota_server -t upload
+```
+
+Or set a default in `platformio.ini`:
+```ini
+[env:ota_server]
+upload_flags = -n "YourDeviceName"
+```
+
+See [OTA/DFU Service](docs/built-in-services.md#otadfu-service) for skip-rebuild and other OTA upload options.
+
 ## Development
 
 ### Logging

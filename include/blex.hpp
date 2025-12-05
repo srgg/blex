@@ -84,6 +84,13 @@
 #ifndef BLEX_HPP_
 #define BLEX_HPP_
 
+// BLEX requires GCC >= 12.2 for C++20 P0634R3 (relaxed typename in dependent scope).
+// See README.md Troubleshooting section for fix instructions.
+#if defined(__GNUC__) && !defined(__clang__)
+#if (__GNUC__ < 12) || ((__GNUC__ == 12) && (__GNUC_MINOR__ < 2))
+#error "BLEX requires GCC >= 12.2. See README.md Troubleshooting section."
+#endif
+#endif
 
 #define CONFIG_BT_NIMBLE_ROLE_OBSERVER_DISABLED
 #define CONFIG_BT_NIMBLE_ROLE_CENTRAL_DISABLED
