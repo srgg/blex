@@ -53,6 +53,20 @@ static void onDisconnect(const NimBLEConnInfo& conn, const int reason) {
     NimBLEDevice::startAdvertising();
 }
 
+static void onMTUChange(NimBLEConnInfo& conn) {
+    Serial.printf("MTU updated: %u bytes for %s\n",
+        conn.getMTU(),
+        conn.getAddress().toString().c_str());
+}
+
+static void onConnParamsUpdate(NimBLEConnInfo& conn) {
+    Serial.printf("Connection params updated for %s: interval=%.2fms, latency=%u, timeout=%ums\n",
+        conn.getAddress().toString().c_str(),
+        conn.getConnInterval() * 1.25f,
+        conn.getConnLatency(),
+        conn.getConnTimeout() * 10);
+}
+
 // ============================================================================
 // BLE Server Configuration
 // ============================================================================
@@ -99,17 +113,20 @@ using MyDevice = MyBlex::Server<
         ::WithIntervals<100, 200>,              // Advertising: 100-200ms
 
 
-    // Connection Configuration
+    // Connection Configuration - slowest possible for max power saving
+    // OTA service will dynamically switch to fast intervals (8-15ms) during transfers
     MyBlex::ConnectionConfig<>
         ::WithMTU<517>                      // MTU: 517 bytes (BLE 4.2+ max)
-        // ::WithIntervals<100, 200>        // Connection: 100-200ms (slow, not for OTA)
-        ::WithIntervals<8, 15>              // Connection: 8-15ms (fast for OTA, 7.5ms is BLE min)
-        ::WithTimeout<4000>,                // Timeout: 4s
+        ::WithIntervals<4000, 4000>         // Connection: 4s (BLE max, slowest possible)
+        ::WithLatency<0>                    // No skipped events
+        ::WithTimeout<32000>,               // Timeout: 32s (BLE max)
 
     // Server Callbacks
     MyBlex::ServerCallbacks<>
         ::WithOnConnect<onConnect>
-        ::WithOnDisconnect<onDisconnect>,
+        ::WithOnDisconnect<onDisconnect>
+        ::WithOnMTUChange<onMTUChange>
+        ::WithOnConnParamsUpdate<onConnParamsUpdate>,
 
     // Services
     MyBlex::PassiveAdvService<DeviceInfoService<MyBlex>>,       // out-of-the-box Device Info service

@@ -832,8 +832,8 @@ async def run_upload_with_args(args: argparse.Namespace) -> int:
     uploader_logger.setLevel(level)
     logging.getLogger("dfu_cli").setLevel(level)
 
-    device_address = args.device or os.environ.get("BLE_DEVICE_ADDRESS")
-    device_name = args.name
+    device_address = (args.device or os.environ.get("BLE_DEVICE_ADDRESS") or "").strip() or None
+    device_name = (args.name or "").strip() or None
 
     if not device_address and not device_name:
         logger.error("Device required (address or name).")

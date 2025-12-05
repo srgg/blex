@@ -101,14 +101,8 @@ namespace ota {
             uint32_t    lastPersistedOffset = 0;
             uint16_t    packetsSinceLastNotify = 0;
             uint16_t    prnValue = 0;
-            uint32_t    cached_crc = 0;       // Incremental CRC cache
-            bool        crc_initialized = false;  // Explicit flag: true when cached_crc is valid
-
-            // Connection speed management
-            uint64_t    last_write_time_us = 0;      // Last successful write timestamp
-            uint16_t    original_conn_min_ms = 0;    // Saved original connection interval min
-            uint16_t    original_conn_max_ms = 0;    // Saved original connection interval max
-            bool        in_fast_mode = false;        // Currently using fast connection params
+            uint32_t    cached_crc = 0;           ///< Incremental CRC cache
+            bool        crc_initialized = false;  ///< Explicit flag: true when cached_crc is valid
         };
 
         static RuntimeState& state();
@@ -321,7 +315,7 @@ namespace ota {
             }
 
             OtaError commit() {
-                if (!otaPartition ) {
+                if (!otaPartition) {
                     BLEX_LOG_ERROR("[OTA] commit: no partition\n");
                     return OtaError::NO_PARTITION;
                 }
@@ -339,11 +333,9 @@ namespace ota {
                     return OtaError::UNKNOWN;
                 }
 
+                // Clear NVS and reset runtime state
                 prefs.remove(NVS_KEY_OFFSET);
                 prefs.remove(NVS_KEY_SIZE);
-                otaPartition = nullptr;
-
-                // Reset runtime state
                 otaOffset = 0;
                 otaTotalSize = 0;
                 otaPartition = nullptr;
@@ -726,6 +718,16 @@ namespace ota {
             protocol::command_response_t response{};
             response.header.request_opcode = protocol::SELECT_OBJECT;
             response.header.status = protocol::SUCCESS;
+
+            // Per Nordic DFU spec: only DATA object type is supported for firmware updates
+            if (payload.type != protocol::DATA) {
+                BLEX_LOG_WARN("[OTA] SELECT_OBJECT: unsupported object type %u (only DATA=0x02 supported)\n",
+                             static_cast<unsigned>(payload.type));
+                response.header.status = protocol::INVALID_PARAMETER;
+                constexpr size_t responseLength = sizeof(protocol::response_header_t);
+                writer(reinterpret_cast<const uint8_t*>(&response), responseLength);
+                return;
+            }
 
             // Return information about the currently selected object
             const uint32_t offset = OtaManager::getOffset();

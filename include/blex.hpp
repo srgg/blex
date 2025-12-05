@@ -150,7 +150,7 @@ struct AggregateFormatDescriptor : AggregateFormatDescriptorBase<PresentationFor
  */
 template<typename T, auto UUID, T Value, typename... Descriptors>
 struct ConstCharacteristic : CharacteristicBase<T, UUID, Permissions<>::AllowRead, ConstCharacteristic<T, UUID, Value, Descriptors...>, Descriptors...> {
-    using Backend = CharacteristicBackend<CharacteristicBase<T, UUID, Permissions<>::AllowRead, ConstCharacteristic<T, UUID, Value, Descriptors...>, Descriptors...>>;
+    using Backend = CharacteristicBackend<CharacteristicBase<T, UUID, Permissions<>::AllowRead, ConstCharacteristic, Descriptors...>>;
     static constexpr T value = Value;
     static constexpr bool is_const_characteristic = true;
 };
@@ -183,7 +183,7 @@ struct blex {
         bool indicate = false,
         bool broadcast = false
     >
-    using Permissions = ::Permissions<read, write, writeNoResp, notify, indicate, broadcast>;
+    using Permissions = Permissions<read, write, writeNoResp, notify, indicate, broadcast>;
 
     // Re-export AdvertisementConfig (matches new signature with array reference)
     template<
@@ -193,7 +193,7 @@ struct blex {
         auto Appearance = BleAppearance::kUnknown,
         const auto& ManufacturerData = blex_core::ManufacturerDataBuilder<>::data
     >
-    using AdvertisementConfig = ::AdvertisementConfig<TxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData>;
+    using AdvertisementConfig = AdvertisementConfig<TxPower, IntervalMin, IntervalMax, Appearance, ManufacturerData>;
 
     template<
         uint16_t MTU = 247,
@@ -202,7 +202,7 @@ struct blex {
         uint16_t ConnLatency = 0,
         uint16_t SupervisionTimeoutMs = 4000  // in milliseconds
     >
-    using ConnectionConfig = ::ConnectionConfig<MTU, ConnIntervalMinMs, ConnIntervalMaxMs, ConnLatency, SupervisionTimeoutMs>;
+    using ConnectionConfig = ConnectionConfig<MTU, ConnIntervalMinMs, ConnIntervalMaxMs, ConnLatency, SupervisionTimeoutMs>;
 
     template<
         BleIOCapability IOCapabilities = NoInputNoOutput,
@@ -211,14 +211,15 @@ struct blex {
         bool SecureConnections = true,
         uint32_t Passkey = 0
     >
-    using SecurityConfig = ::SecurityConfig<IOCapabilities, MITMProtection, Bonding, SecureConnections, Passkey>;
+    using SecurityConfig = SecurityConfig<IOCapabilities, MITMProtection, Bonding, SecureConnections, Passkey>;
 
     template<
         auto OnConnectCb = nullptr,
         auto OnDisconnectCb = nullptr,
-        auto OnMTUChangeCb = nullptr
+        auto OnMTUChangeCb = nullptr,
+        auto OnConnParamsUpdateCb = nullptr
     >
-    using ServerCallbacks = ::ServerCallbacks<OnConnectCb, OnDisconnectCb, OnMTUChangeCb>;
+    using ServerCallbacks = ServerCallbacks<OnConnectCb, OnDisconnectCb, OnMTUChangeCb, OnConnParamsUpdateCb>;
 
     template<
         auto OnReadCb = nullptr,
@@ -226,7 +227,7 @@ struct blex {
         auto OnStatusCb = nullptr,
         auto OnSubscribeCb = nullptr
     >
-    using CharacteristicCallbacks = ::CharacteristicCallbacks<OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>;
+    using CharacteristicCallbacks = CharacteristicCallbacks<OnReadCb, OnWriteCb, OnStatusCb, OnSubscribeCb>;
 
     // Advertising service wrappers
     template<typename Svc>
@@ -252,20 +253,20 @@ struct blex {
 
     // Re-export descriptors and characteristics
     template<typename T, auto UUID, T Value, typename Perms = Permissions<>::AllowRead>
-    using ConstDescriptor = ::ConstDescriptor<T, UUID, Value, Perms>;
+    using ConstDescriptor = ConstDescriptor<T, UUID, Value, Perms>;
 
     template<uint8_t Format, int8_t Exponent, uint16_t Unit, uint8_t Namespace, uint16_t Description>
-    using PresentationFormatDescriptor = ::PresentationFormatDescriptor<Format, Exponent, Unit, Namespace, Description>;
+    using PresentationFormatDescriptor = PresentationFormatDescriptor<Format, Exponent, Unit, Namespace, Description>;
 
     template<typename... PresentationFormatDescriptors>
-    using AggregateFormatDescriptor = ::AggregateFormatDescriptor<PresentationFormatDescriptors...>;
+    using AggregateFormatDescriptor = AggregateFormatDescriptor<PresentationFormatDescriptors...>;
 
     template<typename T, auto UUID, typename Perms = Permissions<>::AllowRead, size_t MaxSize = sizeof(T)>
-    using Descriptor = ::Descriptor<T, UUID, Perms, MaxSize>;
+    using Descriptor = Descriptor<T, UUID, Perms, MaxSize>;
 
     // Re-export ConstCharacteristic from global scope
     template<typename T, auto UUID, T Value, typename... Descriptors>
-    using ConstCharacteristic = ::ConstCharacteristic<T, UUID, Value, Descriptors...>;
+    using ConstCharacteristic = ConstCharacteristic<T, UUID, Value, Descriptors...>;
 
     /**
      * @brief Final Characteristic type (Base + Backend)
@@ -275,8 +276,8 @@ struct blex {
     struct Characteristic : CharacteristicBase<T, UUID, Perms, Characteristic<T, UUID, Perms, Args...>, Args...> {
         // Base typedef inherited via CRTP from CharacteristicBase
         // Backend uses the parent CharacteristicBase type (not CRTP-resolved derived type)
-        using Backend = CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Characteristic<T, UUID, Perms, Args...>, Args...>>;
-        
+        using Backend = CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Characteristic, Args...>>;
+
         // ---------------------- Backend Operations ----------------------
 
         /**
@@ -294,6 +295,42 @@ struct blex {
         static void setValue(const uint8_t* data, size_t size) {
             Backend::template setValue<LP>(data, size);
         }
+
+        /**
+         * @brief Update BLE connection parameters for a specific connection
+         * @param conn_handle Connection handle to update
+         * @param min_interval_ms Minimum connection interval in milliseconds
+         * @param max_interval_ms Maximum connection interval in milliseconds
+         * @param latency Slave latency (default: 0)
+         * @param timeout_ms Supervision timeout in milliseconds (default: 4000)
+         * @return true if request sent, false if not initialized
+         */
+        static bool updateConnectionParams(uint16_t conn_handle, uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                            uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+            return Backend::updateConnectionParams(conn_handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+
+        /**
+         * @brief Update BLE connection parameters for all connected peers
+         * @param min_interval_ms Minimum connection interval in milliseconds
+         * @param max_interval_ms Maximum connection interval in milliseconds
+         * @param latency Slave latency (default: 0)
+         * @param timeout_ms Supervision timeout in milliseconds (default: 4000)
+         * @return true if request sent to at least one peer, false if no connections
+         */
+        static bool updateAllConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                               uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+            return Backend::updateAllConnectionParams(min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+
+        /**
+         * @brief Restore default connection parameters from server's ConnectionConfig
+         * @param conn_handle Connection handle to update
+         * @return true if request sent, false if not initialized or no ConnectionConfig
+         */
+        static bool restoreDefaultConnectionParams(uint16_t conn_handle) {
+            return Backend::restoreDefaultConnectionParams(conn_handle);
+        }
     };
 
     /**
@@ -302,7 +339,7 @@ struct blex {
      */
     template<auto UUID, typename... Chars>
     struct Service : ServiceBase<UUID, Service<UUID, Chars...>, Chars...> {
-        using Backend = ServiceBackend<ServiceBase<UUID, Service<UUID, Chars...>, Chars...>>;
+        using Backend = ServiceBackend<ServiceBase<UUID, Service, Chars...>>;
 
         /**
          * @brief Start the service (add to server if removed)
@@ -327,6 +364,42 @@ struct blex {
         [[nodiscard]]
         static bool isStarted() {
             return Backend::isStarted();
+        }
+
+        /**
+         * @brief Update BLE connection parameters for a specific connection
+         * @param conn_handle Connection handle to update
+         * @param min_interval_ms Minimum connection interval in milliseconds
+         * @param max_interval_ms Maximum connection interval in milliseconds
+         * @param latency Slave latency (default: 0)
+         * @param timeout_ms Supervision timeout in milliseconds (default: 4000)
+         * @return true if request sent, false if not initialized
+         */
+        static bool updateConnectionParams(uint16_t conn_handle, uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                            uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+            return Backend::updateConnectionParams(conn_handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+
+        /**
+         * @brief Update BLE connection parameters for all connected peers
+         * @param min_interval_ms Minimum connection interval in milliseconds
+         * @param max_interval_ms Maximum connection interval in milliseconds
+         * @param latency Slave latency (default: 0)
+         * @param timeout_ms Supervision timeout in milliseconds (default: 4000)
+         * @return true if request sent to at least one peer, false if no connections
+         */
+        static bool updateAllConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                               uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+            return Backend::updateAllConnectionParams(min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+
+        /**
+         * @brief Restore default connection parameters from server's ConnectionConfig
+         * @param conn_handle Connection handle to update
+         * @return true if request sent, false if not initialized or no ConnectionConfig
+         */
+        static bool restoreDefaultConnectionParams(uint16_t conn_handle) {
+            return Backend::restoreDefaultConnectionParams(conn_handle);
         }
     };
 
@@ -353,10 +426,10 @@ struct blex {
         typename... Args
     >
     struct Server : ServerBase<ShortName, Server<ShortName, Args...>, Args...> {
-        using Base = ServerBase<ShortName, Server<ShortName, Args...>, Args...>;
+        using Base = ServerBase<ShortName, Server, Args...>;
         using Backend = ServerBackend<Base>;
-        using ConnectionHandle = typename Backend::connection_handle_t;
-        using ConnectionInfo = typename Backend::ConnectionInfoType;
+        using ConnectionHandle = Backend::connection_handle_t;
+        using ConnectionInfo = Backend::ConnectionInfoType;
         static constexpr ConnectionHandle InvalidConnHandle = Backend::InvalidConnHandle;
 
         // ---------------------- Lifecycle ----------------------
@@ -464,6 +537,21 @@ struct blex {
         }
 
         /**
+         * @brief Request connection parameter update for a specific connection
+         * @param conn_handle Connection handle to update
+         * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
+         * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
+         * @param latency Slave latency (number of connection events to skip, 0-499)
+         * @param timeout_ms Supervision timeout in milliseconds (100-32000)
+         * @return true if request sent, false if server not initialized
+         * @note The central (phone/computer) may reject or modify these parameters
+         */
+        static bool updateConnectionParams(uint16_t conn_handle, uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                            uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+            return Backend::updateConnectionParams(conn_handle, min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+
+        /**
          * @brief Request connection parameter update for all connected peers
          * @param min_interval_ms Minimum connection interval in milliseconds (7.5-4000)
          * @param max_interval_ms Maximum connection interval in milliseconds (7.5-4000)
@@ -472,9 +560,18 @@ struct blex {
          * @return true if request sent to at least one peer, false if no connections
          * @note The central (phone/computer) may reject or modify these parameters
          */
-        static bool updateConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
-                                            uint16_t latency = 0, uint16_t timeout_ms = 4000) {
-            return Backend::updateConnectionParams(min_interval_ms, max_interval_ms, latency, timeout_ms);
+        static bool updateAllConnectionParams(uint16_t min_interval_ms, uint16_t max_interval_ms,
+                                               uint16_t latency = 0, uint16_t timeout_ms = 4000) {
+            return Backend::updateAllConnectionParams(min_interval_ms, max_interval_ms, latency, timeout_ms);
+        }
+
+        /**
+         * @brief Restore default connection parameters from server's ConnectionConfig
+         * @param conn_handle Connection handle to update
+         * @return true if request sent, false if server not initialized or no ConnectionConfig
+         */
+        static bool restoreDefaultConnectionParams(uint16_t conn_handle) {
+            return Backend::restoreDefaultConnectionParams(conn_handle);
         }
 
         // ---------------------- Service Management ----------------------
@@ -550,14 +647,14 @@ struct blex {
 
         template<typename ServiceOrWrapped>
         static void register_service() {
-            using ActualService = typename blex_core::unwrap_service_impl<ServiceOrWrapped>::type;
+            using ActualService = blex_core::unwrap_service_impl<ServiceOrWrapped>::type;
             ActualService::validate();
             ActualService::Backend::template register_service<LockPolicy>(Backend::server);
         }
 
         template<typename ServiceOrWrapped>
         static void start_service() {
-            using ActualService = typename blex_core::unwrap_service_impl<ServiceOrWrapped>::type;
+            using ActualService = blex_core::unwrap_service_impl<ServiceOrWrapped>::type;
             // Delegate to backend trait method (removes blex_nimble dependency)
             Backend::template startService<ActualService>();
         }

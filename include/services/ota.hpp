@@ -83,16 +83,104 @@
 
 namespace ota
 {
+    /// Connection parameters for OTA speed optimization
+    namespace connection {
+        /// Fast connection parameters for OTA transfer (8-15ms interval)
+        inline constexpr uint16_t FAST_MIN_INTERVAL_MS = 8;
+        inline constexpr uint16_t FAST_MAX_INTERVAL_MS = 15;
+    }  // namespace connection
+
     namespace detail {
         /**
          * @brief OTA service implementation using binary command dispatch
          * @tparam Blex blex<LockPolicy> type for characteristic definitions
+         *
+         * @details Implements exclusive OTA access - only one connection can own the OTA session.
+         * The first connection to subscribe to CtrlChar notifications becomes the owner.
+         * Commands and data from non-owner connections are rejected.
          */
         template<typename Blex>
         class OtaServiceImpl {
             using Perms = Blex::template Permissions<>;
             using CharCallbacks = Blex::template CharacteristicCallbacks<>;
             using guard_t = blex_sync::ScopedLock<Blex::template lock_policy, OtaServiceImpl>;
+
+            /**
+             * @brief OTA session state manager - handles ownership and connection speed
+             * @details Encapsulates exclusive access logic. Uses CtrlChar::updateConnectionParams
+             * for connection parameter updates (accessed via forward-declared CtrlChar).
+             */
+            class OtaSession {
+                static constexpr uint16_t INVALID_HANDLE = 0xFFFF;
+
+                uint16_t owner_handle = INVALID_HANDLE;
+                bool in_fast_mode = false;
+
+                [[nodiscard]] bool hasOwner() const { return owner_handle != INVALID_HANDLE; }
+                [[nodiscard]] bool isOwner(const uint16_t handle) const { return owner_handle == handle; }
+            public:
+                /**
+                 * @brief Try to acquire OTA session ownership
+                 * @return true if acquired or already owned, false if owned by another
+                 */
+                bool tryAcquire(const uint16_t handle) {
+                    guard_t guard;
+                    if (!hasOwner()) {
+                        owner_handle = handle;
+                        BLEX_LOG_INFO("[OTA] Session is acquired by connection %u\n", handle);
+                        return true;
+                    }
+                    if (owner_handle == handle) {
+                        BLEX_LOG_WARN("[OTA] Session already locked by %u\n", owner_handle);
+                        return true;  // Already owner
+                    }
+                    BLEX_LOG_WARN("[OTA] Rejecting acquire session request from %u; session already locked by %u\n", handle, owner_handle);
+                    return false;
+                }
+
+                /**
+                 * @brief Release OTA session and restore connection params
+                 */
+                void release(const uint16_t handle) {
+                    guard_t guard;
+                    if (isOwner(handle)) {
+                        restoreConnection_unlocked(handle);
+                        owner_handle = INVALID_HANDLE;
+                        BLEX_LOG_INFO("[OTA] Session released by connection %u\n", handle);
+                    }
+                }
+
+                /**
+                 * @brief Switch to fast connection parameters for OTA transfer
+                 * @note Disabled: macOS/iOS centrals ignore peripheral connection parameter requests.
+                 *       The central controls connection intervals. On Linux, use sysfs to set intervals.
+                 */
+                void switchToFastConnection([[maybe_unused]] uint16_t handle) {
+                    guard_t guard;
+                    if (!in_fast_mode) {
+                        BLEX_LOG_INFO("[OTA] Attempting to switch to fast connection (interval %u-%u ms)\n",
+                            connection::FAST_MIN_INTERVAL_MS, connection::FAST_MAX_INTERVAL_MS);
+
+                        CtrlChar::updateConnectionParams(handle,
+                            connection::FAST_MIN_INTERVAL_MS, connection::FAST_MAX_INTERVAL_MS, 0, 4000);
+                        in_fast_mode = true;
+
+                    }
+                }
+
+            private:
+                /// Called with lock held
+                void restoreConnection_unlocked([[maybe_unused]] uint16_t handle) {
+                    if (in_fast_mode) {
+                        BLEX_LOG_INFO("[OTA] Restoring default connection params\n");
+                        CtrlChar::restoreDefaultConnectionParams(handle);
+                        in_fast_mode = false;
+                    }
+                }
+            };
+
+            /// Static session state
+            inline static OtaSession session_{};
 
             /**
              * @brief Write response via Ctrl characteristic notify
@@ -102,10 +190,68 @@ namespace ota
             }
 
             /**
+             * @brief Send error response for rejected commands
+             */
+            static void sendErrorResponse(const uint8_t opcode) {
+                protocol::response_header_t response;
+                response.request_opcode = opcode;
+                response.status = protocol::OPERATION_FAILED;
+                ctrlWriter(reinterpret_cast<const uint8_t*>(&response), sizeof(response));
+            }
+
+            /**
+             * @brief Control characteristic write handler with ownership check
+             */
+            static void onCtrlWrite(const uint8_t* data, const size_t len, NimBLEConnInfo& connInfo) {
+                // Reject commands from a non-owner (tryAcquire is atomic)
+                if (uint16_t handle = connInfo.getConnHandle(); !session_.tryAcquire(handle)) {
+                    BLEX_LOG_WARN("[OTA] Command rejected from %u\n", handle);
+                    if (len > 0) {
+                        sendErrorResponse(data[0]);
+                    }
+                    return;
+                }
+
+                command_dispatcher::dispatch(data, len);
+            }
+
+            /**
+             * @brief Control characteristic subscribe handler - manages ownership
+             */
+            static void onCtrlSubscribe(const uint16_t subValue, NimBLEConnInfo& connInfo) {
+                uint16_t handle = connInfo.getConnHandle();
+
+                if (subValue > 0) {
+                    session_.tryAcquire(handle);
+                } else {
+                    session_.release(handle);
+                }
+            }
+
+            /**
+             * @brief Data characteristic write handler with ownership and speed management
+             */
+            static void onWriteData(const uint8_t* data, const size_t len, NimBLEConnInfo& connInfo) {
+                uint16_t handle = connInfo.getConnHandle();
+
+                // Atomically check/acquire ownership - rejects if owned by another
+                if (!session_.tryAcquire(handle)) {
+                    BLEX_LOG_DEBUG("[OTA] Data ignored from %u\n", handle);
+                    return;
+                }
+
+                // Switch to fast connection on first data
+                session_.switchToFastConnection(handle);
+
+                guard_t guard;
+                dfu::handle_write_data(ctrlWriter, data, len);
+            }
+
+            /**
              * @brief Command dispatcher - opcode + handler, payload auto-deduced
              */
             using command_dispatcher = blex_binary_command::Dispatcher<
-                blex_binary_command::Command<protocol::CREATE_OBJECT,      [](const protocol::create_object_payload_t& payload){
+                blex_binary_command::Command<protocol::CREATE_OBJECT, [](const protocol::create_object_payload_t& payload){
                     guard_t guard;
                     dfu::doCreateObject(ctrlWriter, payload);
             }>,
@@ -125,23 +271,17 @@ namespace ota
                 guard_t guard;
                 dfu::doSelectObject(ctrlWriter, payload);
             }>,
-            blex_binary_command::Fallback<[](uint8_t opcode, blex_binary_command::DispatchError error) {
+            blex_binary_command::Fallback<[](const uint8_t opcode, const blex_binary_command::DispatchError error) {
                 guard_t guard;
                 dfu::doDispatchError(ctrlWriter, opcode, error);
             }>
         >;
 
-            /**
-             * @brief Data characteristic write handler - raw firmware bytes
-             */
-            static void onWriteData(const uint8_t* data, const size_t len) {
-                guard_t guard;
-                dfu::handle_write_data(ctrlWriter, data, len);
-            }
         public:
             /**
              * @brief DFU Control Characteristic
-             * @details Receives commands (RX dispatch), sends responses via notification
+             * @details Receives commands (RX dispatch), sends responses via notification.
+             * Subscribe handler manages OTA session ownership.
              *
              * Buffer type: C array sized from dfu_command_dispatcher::max_message_size
              */
@@ -149,7 +289,8 @@ namespace ota
                 typename command_dispatcher::buffer_type,
                 uuids::DFU_CTRL,
                 typename Perms::AllowWrite::AllowNotify,
-                typename CharCallbacks::template WithOnWrite<command_dispatcher::dispatch>
+                typename CharCallbacks::template WithOnWrite<onCtrlWrite>
+                                      ::template WithOnSubscribe<onCtrlSubscribe>
             >;
 
             /**
@@ -168,7 +309,7 @@ namespace ota
     }  // namespace detail
 
     /// Suppress -Wsubobject-linkage: lambdas in template parameters create anonymous namespace types.
-    /// Safe here: header-only design with single translation unit ensures no ODR violations.
+    /// Safe here: header-only design with a single translation unit ensures no ODR violations.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsubobject-linkage"
     template<typename Blex, typename C = detail::OtaServiceImpl<Blex> >

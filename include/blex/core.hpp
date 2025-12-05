@@ -214,18 +214,34 @@ template<typename... Args>
 using filter_non_config = filter_types<is_any_config, std::tuple, false, Args...>;
 
 // Callback validation
+// Note: WriteHandler with ConnectionInfo is validated at backend level (backend-specific type)
 template<typename T, auto CallbackFunc>
 struct CallbackTraits {
     static constexpr bool is_valid_on_read = std::is_invocable_v<decltype(CallbackFunc), T&>;
-    static constexpr bool is_valid_on_write =
-        // Standard: callback(const T&)
+
+    // Write callbacks can be:
+    // - callback(const T&) or callback(const uint8_t*, size_t) - without connection info
+    // - callback(const T&, ConnInfo&) or callback(const uint8_t*, size_t, ConnInfo&) - with connection info
+    // ConnInfo validation happens at backend level since it's backend-specific (NimBLEConnInfo, etc.)
+    static constexpr bool is_valid_on_write_basic =
         std::is_invocable_v<decltype(CallbackFunc), const T&> ||
         (std::is_array_v<T> &&
-        // callback(const uint8_t*, size_t) for uint8_t[N] types
          std::is_same_v<std::remove_extent_t<T>, uint8_t> &&
          std::is_invocable_v<decltype(CallbackFunc), const uint8_t*, size_t>);
+
+    // For core validation, we accept basic signature OR assume extended signature will be validated by backend
+    // This is permissive - backend does final validation
+    static constexpr bool is_valid_on_write = is_valid_on_write_basic ||
+        // If not basic, assume it might be extended with ConnInfo (validated by backend)
+        !std::is_same_v<decltype(CallbackFunc), std::nullptr_t>;
+
     static constexpr bool is_valid_on_status = std::is_invocable_v<decltype(CallbackFunc), int>;
-    static constexpr bool is_valid_on_subscribe = std::is_invocable_v<decltype(CallbackFunc), uint16_t>;
+
+    // Subscribe callback: basic (uint16_t) or extended (uint16_t, ConnInfo&) validated by backend
+    static constexpr bool is_valid_on_subscribe_basic = std::is_invocable_v<decltype(CallbackFunc), uint16_t>;
+    static constexpr bool is_valid_on_subscribe = is_valid_on_subscribe_basic ||
+        // If not basic, assume it might be extended with ConnInfo (validated by backend)
+        !std::is_same_v<decltype(CallbackFunc), std::nullptr_t>;
 };
 
 } // namespace blex_core
@@ -249,7 +265,7 @@ struct ConnectionConfig;
 template<BleIOCapability, bool, bool, bool, uint32_t>
 struct SecurityConfig;
 
-template<auto, auto, auto>
+template<auto, auto, auto, auto>
 struct ServerCallbacks;
 
 template<auto, auto, auto, auto>
@@ -431,7 +447,7 @@ using extract_security_config = extract_first_matching<
 template<typename... Args>
 using extract_server_callbacks = extract_first_matching<
     is_server_callbacks_pred,
-    ServerCallbacks<nullptr, nullptr, nullptr>,
+    ServerCallbacks<nullptr, nullptr, nullptr, nullptr>,
     Args...
 >;
 
@@ -1235,22 +1251,28 @@ struct SecurityConfig {
 
 // Internal implementation details for ServerCallbacks (hidden from user-facing API)
 namespace server_callbacks_detail {
-    template<auto Cb, auto OnConnectCb, auto OnDisconnectCb, auto OnMTUChangeCb>
+    template<auto Cb, auto OnConnectCb, auto OnDisconnectCb, auto OnMTUChangeCb, auto OnConnParamsUpdateCb>
     struct WithOnConnectImpl {
         // Backend validates callback signature at compile time when invoking
-        using type = ServerCallbacks<Cb, OnDisconnectCb, OnMTUChangeCb>;
+        using type = ServerCallbacks<Cb, OnDisconnectCb, OnMTUChangeCb, OnConnParamsUpdateCb>;
     };
 
-    template<auto Cb, auto OnConnectCb, auto OnDisconnectCb, auto OnMTUChangeCb>
+    template<auto Cb, auto OnConnectCb, auto OnDisconnectCb, auto OnMTUChangeCb, auto OnConnParamsUpdateCb>
     struct WithOnDisconnectImpl {
         // Backend validates callback signature at compile time when invoking
-        using type = ServerCallbacks<OnConnectCb, Cb, OnMTUChangeCb>;
+        using type = ServerCallbacks<OnConnectCb, Cb, OnMTUChangeCb, OnConnParamsUpdateCb>;
     };
 
-    template<auto Cb, auto OnConnectCb, auto OnDisconnectCb, auto OnMTUChangeCb>
+    template<auto Cb, auto OnConnectCb, auto OnDisconnectCb, auto OnMTUChangeCb, auto OnConnParamsUpdateCb>
     struct WithOnMTUChangeImpl {
         // Backend validates callback signature at compile time when invoking
-        using type = ServerCallbacks<OnConnectCb, OnDisconnectCb, Cb>;
+        using type = ServerCallbacks<OnConnectCb, OnDisconnectCb, Cb, OnConnParamsUpdateCb>;
+    };
+
+    template<auto Cb, auto OnConnectCb, auto OnDisconnectCb, auto OnMTUChangeCb, auto OnConnParamsUpdateCb>
+    struct WithOnConnParamsUpdateImpl {
+        // Backend validates callback signature at compile time when invoking
+        using type = ServerCallbacks<OnConnectCb, OnDisconnectCb, OnMTUChangeCb, Cb>;
     };
 } // namespace server_callbacks_detail
 
@@ -1258,7 +1280,8 @@ namespace server_callbacks_detail {
 template<
     auto OnConnectCb = nullptr,
     auto OnDisconnectCb = nullptr,
-    auto OnMTUChangeCb = nullptr
+    auto OnMTUChangeCb = nullptr,
+    auto OnConnParamsUpdateCb = nullptr
 >
 struct ServerCallbacks {
     // Marker for trait detection
@@ -1268,16 +1291,20 @@ struct ServerCallbacks {
     static constexpr auto on_connect = OnConnectCb;
     static constexpr auto on_disconnect = OnDisconnectCb;
     static constexpr auto on_mtu_change = OnMTUChangeCb;
+    static constexpr auto on_conn_params_update = OnConnParamsUpdateCb;
 
     // Fluent builder methods - each validates signature and returns new type
     template<auto NewCallback>
-    using WithOnConnect = server_callbacks_detail::WithOnConnectImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
+    using WithOnConnect = server_callbacks_detail::WithOnConnectImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb, OnConnParamsUpdateCb>::type;
 
     template<auto NewCallback>
-    using WithOnDisconnect = server_callbacks_detail::WithOnDisconnectImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
+    using WithOnDisconnect = server_callbacks_detail::WithOnDisconnectImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb, OnConnParamsUpdateCb>::type;
 
     template<auto NewCallback>
-    using WithOnMTUChange = server_callbacks_detail::WithOnMTUChangeImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb>::type;
+    using WithOnMTUChange = server_callbacks_detail::WithOnMTUChangeImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb, OnConnParamsUpdateCb>::type;
+
+    template<auto NewCallback>
+    using WithOnConnParamsUpdate = server_callbacks_detail::WithOnConnParamsUpdateImpl<NewCallback, OnConnectCb, OnDisconnectCb, OnMTUChangeCb, OnConnParamsUpdateCb>::type;
 };
 
 // Internal implementation details for CharacteristicCallbacks (hidden from user-facing API)
@@ -1389,6 +1416,7 @@ struct ServerBase {
     static constexpr auto ConnectHandler = CallbacksConfig::on_connect;
     static constexpr auto DisconnectHandler = CallbacksConfig::on_disconnect;
     static constexpr auto MTUChangeHandler = CallbacksConfig::on_mtu_change;
+    static constexpr auto ConnParamsUpdateHandler = CallbacksConfig::on_conn_params_update;
 
     // Advertising service filtering (compile-time)
     using PassiveServices = blex_core::filter_services_pack<blex_core::is_passive_adv_pred, ServicesTuple>::type;
