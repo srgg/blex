@@ -55,6 +55,13 @@ private:
          std::is_standard_layout_v<Payload> &&      // predictable wire format
          has_one_byte_alignment<Payload>::value);       // no padding (#pragma pack(1))
 
+    /// @brief Helper to get sizeof(T) without triggering sizeof(void) warning
+    template<typename T, typename = void>
+    struct sizeof_or_zero : std::integral_constant<size_t, sizeof(T)> {};
+
+    template<typename T>
+    struct sizeof_or_zero<T, std::enable_if_t<std::is_void_v<T>>> : std::integral_constant<size_t, 0> {};
+
     /// @brief Bool trait - has a message interface (SFINAE, no errors)
     template<typename, typename = void>
     struct has_message_like_interface : std::false_type {};
@@ -92,8 +99,7 @@ private:
 
         static constexpr uint8_t opcode = static_cast<uint8_t>(Opcode);
         using payload_type = Payload;
-        static constexpr size_t payload_size =
-            std::is_void_v<Payload> ? 0 : sizeof(Payload);
+        static constexpr size_t payload_size = sizeof_or_zero<Payload>::value;
     };
 
 public:

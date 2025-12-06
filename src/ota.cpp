@@ -439,28 +439,39 @@ namespace ota {
             return setError(OTA_OUT_OF_RANGE);
         }
 
-        // Timing: flash write
+#if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
         const auto flash_start = esp_timer_get_time();
+#endif
         if (setError(getImpl()->write(data, len)) != NONE) {
             getImpl()->abort();
             return lastError();
         }
+#if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
         const auto flash_us = esp_timer_get_time() - flash_start;
+#endif
 
         state.written += len;
 
         // Update cached CRC incrementally (only if initialized)
+#if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
         uint64_t crc_us = 0;
+#endif
         if (state.crc_initialized) {
+#if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
             const auto crc_start = esp_timer_get_time();
+#endif
             state.cached_crc = crc32_update(state.cached_crc, data, len);
+#if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
             crc_us = esp_timer_get_time() - crc_start;
+#endif
         }
 
+#if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
         // Log timing every 32 packets (same as PRN interval)
         if ((state.packetsSinceLastNotify & 31) == 31) {
             BLEX_LOG_DEBUG("[OTA TIMING] flash=%llu us, crc=%llu us (chunk=%zu)\n", flash_us, crc_us, len);
         }
+#endif
 
         // persist occasionally
         if (state.written - state.lastPersistedOffset >= PERSIST_INTERVAL) {
@@ -636,9 +647,8 @@ namespace ota {
 
             const uint16_t prn = payload.value;
             constexpr uint16_t MIN_PRN = 8;    // At least CRC every 4KB (8 × 512)
-            constexpr uint16_t MAX_PRN = 128;  // At most CRC every 64KB (128 × 512)
 
-            if (prn < MIN_PRN || prn > MAX_PRN) {
+            if (constexpr uint16_t MAX_PRN = 128; prn < MIN_PRN || prn > MAX_PRN) {
                 BLEX_LOG_ERROR("[OTA] PRN value out of range: %u (valid: %u-%u)\n",
                                prn, MIN_PRN, MAX_PRN);
                 response.header.status = protocol::INVALID_PARAMETER;
@@ -790,8 +800,7 @@ namespace ota {
                 return;
             }
 
-            constexpr size_t MAX_PACKET_SIZE = 512;  // Match BLE MTU minus overhead
-            if (size > MAX_PACKET_SIZE) {
+            if (constexpr size_t MAX_PACKET_SIZE = 512; size > MAX_PACKET_SIZE) {
                 BLEX_LOG_ERROR("[OTA] Oversized data packet: %zu > %zu\n", size, MAX_PACKET_SIZE);
                 return;
             }
