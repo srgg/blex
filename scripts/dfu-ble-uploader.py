@@ -75,6 +75,7 @@ from typing import Any, Dict, Optional, Tuple
 try:
     from bleak import BleakClient, BleakScanner, BleakError  # type: ignore
     from bleak.backends.device import BLEDevice  # type: ignore
+    from bleak.exc import BleakCharacteristicNotFoundError  # type: ignore
 except Exception as e:  # pragma: no cover - dependency error path
     raise SystemExit(
         "Missing dependency 'bleak'. Install with: pip install bleak\n"
@@ -186,6 +187,11 @@ class ConnectionFailed(DFUError):
     exit_code = EXIT_CONNECTION_FAILED
 
 
+class ServiceNotFound(ConnectionFailed):
+    """DFU service/characteristic not found - non-retryable."""
+    pass
+
+
 class VerificationFailed(DFUError):
     exit_code = EXIT_VERIFICATION_FAILED
 
@@ -286,6 +292,18 @@ class BLETransport:
             raise DeviceNotFound(f"Device named '{name}' advertising DFU service not found")
         return candidate
 
+    async def _safe_disconnect(self) -> None:
+        """Disconnect without raising - for cleanup after connection failures."""
+        if not self._client:
+            return
+        try:
+            if self._client.is_connected:
+                await asyncio.wait_for(self._client.disconnect(), timeout=0.5)
+        except Exception:
+            pass  # Silently ignore cleanup errors
+        finally:
+            self._client = None
+
     async def connect(self, device: Any, requested_mtu: int = 517) -> None:
         """
         Connect to the device and negotiate MTU.
@@ -300,12 +318,17 @@ class BLETransport:
             self._mtu = self._client.mtu_size
             await self._client.start_notify(self.ctrl_uuid, self._on_notification)
             await asyncio.sleep(0.2)
+        except BleakCharacteristicNotFoundError as e:
+            await self._safe_disconnect()
+            device_addr = getattr(device, "address", str(device))
+            # Extract short UUID (first 8 chars) for readability
+            short_uuid = self.ctrl_uuid.split("-")[0]
+            raise ServiceNotFound(
+                f"DFU service ({short_uuid}) not found on device {device_addr}. "
+                f"Ensure the device is running firmware with OTA support enabled."
+            ) from e
         except Exception as e:
-            # Ensure a client is cleared on failure
-            try:
-                await self.disconnect()
-            except Exception:
-                pass
+            await self._safe_disconnect()
             raise ConnectionFailed(f"Failed to connect: {e}") from e
 
     async def disconnect(self) -> None:
@@ -316,11 +339,11 @@ class BLETransport:
                 try:
                     await asyncio.wait_for(self._client.stop_notify(self.ctrl_uuid), timeout=0.5)
                 except (asyncio.TimeoutError, Exception):
-                    self._logger.debug("stop_notify failed (ignored)", exc_info=True)
+                    self._logger.debug("stop_notify failed (ignored)")
                 try:
                     await asyncio.wait_for(self._client.disconnect(), timeout=0.5)
                 except (asyncio.TimeoutError, Exception):
-                    self._logger.debug("disconnect failed (ignored)", exc_info=True)
+                    self._logger.debug("disconnect failed (ignored)")
         finally:
             self._client = None
 
@@ -724,6 +747,9 @@ class DFUUploader:
                 else:
                     print(f"✓ Connected (MTU={self.transport._mtu}, chunk={self.chunk_size})", flush=True)
                 break
+            except ServiceNotFound:
+                # Non-retryable: DFU service not present on device
+                raise
             except Exception as exc:
                 last_exc = exc
                 print(f"WARNING: Connect attempt {attempt} failed: {exc}", flush=True)
@@ -735,7 +761,7 @@ class DFUUploader:
                 if attempt < MAX_CONNECTION_RETRIES:
                     await asyncio.sleep(2 ** (attempt - 1))
                 else:
-                    raise ConnectionFailed(f"Failed to connect after {MAX_CONNECTION_RETRIES} attempts: {last_exc!r}")
+                    raise ConnectionFailed(f"Failed to connect after {MAX_CONNECTION_RETRIES} attempts: {last_exc}")
 
         try:
             # Set PRN

@@ -759,9 +759,14 @@ namespace ota {
             response.header.request_opcode = opcode;
 
             switch (error) {
+                case blex_binary_command::DispatchError::none:
+                    // Success - should not reach fallback handler
+                    response.header.status = protocol::SUCCESS;
+                    break;
                 case blex_binary_command::DispatchError::payload_too_small:
                 case blex_binary_command::DispatchError::payload_too_big:
                 case blex_binary_command::DispatchError::invalid_message:
+                case blex_binary_command::DispatchError::invalid_payload:
                     response.header.status = protocol::INVALID_COMMAND;
                     break;
                 case blex_binary_command::DispatchError::unknown_opcode:

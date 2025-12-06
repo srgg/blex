@@ -124,6 +124,7 @@ public:
 /**
  * @brief Handler trait - extracts payload type from handler signatures
  * @details Supports function pointers, lambdas, and functors (including noexcept variants).
+ *          Handles both fixed-size void(const Payload&) and variable-size void(const Payload&, size_t).
  */
 struct handler_trait {
 private:
@@ -164,6 +165,17 @@ private:
     struct extract<void(*)(Payload) noexcept, std::enable_if_t<
         !std::is_same_v<Payload, void> && !std::is_reference_v<Payload>
     >> {
+        using type = std::remove_cvref_t<Payload>;
+    };
+
+    // Variable-size handlers: void(const Payload&, size_t)
+    template<typename Payload>
+    struct extract<void(*)(const Payload&, size_t), void> {
+        using type = std::remove_cvref_t<Payload>;
+    };
+
+    template<typename Payload>
+    struct extract<void(*)(const Payload&, size_t) noexcept, void> {
         using type = std::remove_cvref_t<Payload>;
     };
 
@@ -228,6 +240,27 @@ private:
         using type = std::remove_cvref_t<Payload>;
     };
 
+    // Variable-size member function pointers: void(const Payload&, size_t)
+    template<typename T, typename Payload>
+    struct extract<void(T::*)(const Payload&, size_t), void> {
+        using type = std::remove_cvref_t<Payload>;
+    };
+
+    template<typename T, typename Payload>
+    struct extract<void(T::*)(const Payload&, size_t) noexcept, void> {
+        using type = std::remove_cvref_t<Payload>;
+    };
+
+    template<typename T, typename Payload>
+    struct extract<void(T::*)(const Payload&, size_t) const, void> {
+        using type = std::remove_cvref_t<Payload>;
+    };
+
+    template<typename T, typename Payload>
+    struct extract<void(T::*)(const Payload&, size_t) const noexcept, void> {
+        using type = std::remove_cvref_t<Payload>;
+    };
+
 public:
     /// @brief Extract payload type from handler (function/lambda/functor)
     template<auto Handler>
@@ -239,11 +272,124 @@ public:
  * @brief Error codes for dispatch failures
  */
 enum class DispatchError : uint8_t {
+    none = 0,           ///< Success (for custom validators)
     unknown_opcode,     ///< No command registered for this opcode
     payload_too_small,  ///< Payload shorter than required
     payload_too_big,    ///< Payload longer than required (strict mode)
-    invalid_message     ///< Message is null or empty (no opcode)
+    invalid_message,    ///< Message is null or empty (no opcode)
+    invalid_payload     ///< Custom validator rejection (size semantically wrong)
 };
+
+}  // namespace detail
+
+/**
+ * @brief Payload size validation policies
+ * @details Policies control how payload size is validated before handler invocation.
+ *          Each policy provides a static validate() member function.
+ */
+namespace payload {
+
+/**
+ * @brief Exact size policy - validates payload length matches expected size
+ * @tparam N Expected size in bytes. N=0 defers validation to dispatcher (infers from payload type)
+ *
+ * @details
+ * - SizeExact<> (N=0): Dispatcher validates len == sizeof(handler's payload type)
+ * - SizeExact<N> (N>0): Policy validates len == N
+ */
+template<size_t N = 0>
+struct SizeExact {
+    /// @brief Validates payload length equals N (or defers if N=0)
+    static constexpr detail::DispatchError validate(const uint8_t*, size_t len) noexcept {
+        if constexpr (N == 0) {
+            return detail::DispatchError::none;  // Validated by dispatcher
+        } else {
+            if (len < N) return detail::DispatchError::payload_too_small;
+            if (len > N) return detail::DispatchError::payload_too_big;
+            return detail::DispatchError::none;
+        }
+    }
+};
+
+/**
+ * @brief Minimum size policy - validates payload length >= N
+ * @tparam N Minimum required size in bytes
+ */
+template<size_t N>
+struct SizeAtLeast {
+    /// @brief Validates payload length is at least N bytes
+    static constexpr detail::DispatchError validate(const uint8_t*, size_t len) noexcept {
+        return len >= N ? detail::DispatchError::none : detail::DispatchError::payload_too_small;
+    }
+};
+
+/**
+ * @brief Maximum size policy - validates payload length <= N
+ * @tparam N Maximum allowed size in bytes
+ */
+template<size_t N>
+struct SizeAtMost {
+    /// @brief Validates payload length is at most N bytes
+    static constexpr detail::DispatchError validate(const uint8_t*, size_t len) noexcept {
+        return len <= N ? detail::DispatchError::none : detail::DispatchError::payload_too_big;
+    }
+};
+
+/**
+ * @brief Range size policy - validates Min <= payload length <= Max
+ * @tparam Min Minimum required size in bytes
+ * @tparam Max Maximum allowed size in bytes
+ */
+template<size_t Min, size_t Max>
+struct SizeBetween {
+    static_assert(Min <= Max, "SizeBetween: Min must be <= Max");
+
+    /// @brief Validates payload length is within [Min, Max] inclusive
+    static constexpr detail::DispatchError validate(const uint8_t*, size_t len) noexcept {
+        if (len < Min) return detail::DispatchError::payload_too_small;
+        if (len > Max) return detail::DispatchError::payload_too_big;
+        return detail::DispatchError::none;
+    }
+};
+
+/**
+ * @brief Unbounded size policy - accepts any payload size
+ * @details Use when handler performs its own validation or any size is valid
+ */
+struct SizeUnbounded {
+    /// @brief Always returns success - no size restrictions
+    static constexpr detail::DispatchError validate(const uint8_t*, size_t) noexcept {
+        return detail::DispatchError::none;
+    }
+};
+
+/**
+ * @brief Custom validator policy - delegates to user-provided function
+ * @tparam Validator Function with signature DispatchError(const uint8_t* data, size_t len)
+ *
+ * @details Enables discrete size limits, runtime-dependent validation, or complex rules.
+ *
+ * Example:
+ * @code
+ * DispatchError discreteSizeValidator(const uint8_t*, size_t len) {
+ *     return (len == 0 || len == 2 || len == 4)
+ *         ? DispatchError::none
+ *         : DispatchError::invalid_payload;
+ * }
+ * using DiscreteCmd = Command<0x05, handleDiscrete, payload::ValidateWith<discreteSizeValidator>>;
+ * @endcode
+ */
+template<auto Validator>
+struct ValidateWith {
+    /// @brief Delegates validation to custom validator function
+    static detail::DispatchError validate(const uint8_t* data, size_t len) {
+        return Validator(data, len);
+    }
+};
+
+}  // namespace payload
+
+namespace detail {
 
 /**
  * @brief Concept: Fallback handler signature
@@ -405,24 +551,40 @@ using DispatchError = detail::DispatchError;
 using detail::Fallback;
 
 /**
- * @brief Fixed-size command - opcode + handler, payload auto-deduced
+ * @brief Command with configurable size policy - opcode + handler + validation
  * @tparam Opcode Message opcode (0-255)
- * @tparam Handler Function pointer or lambda with signature void(const Payload&) or void() - payload type extracted automatically
+ * @tparam Handler Function pointer or lambda - payload type extracted automatically
+ * @tparam SizePolicy Validation policy (default: SizeExact<> for backward compatibility)
  *
- * @details Combines opcode, payload type, and handler in a single type.
- * Payload size is validated at compile time. For variable-size payloads,
- * use VarSizeCommand (future).
+ * @details Combines opcode, payload type, handler, and size policy in a single type.
  *
- * Example:
+ * Handler signatures:
+ * - Fixed-size (SizeExact<>): void(const Payload&) - length is compile-time known
+ * - Variable-size (all others): void(const Payload&, size_t len) - receives actual length
+ *
+ * Examples:
  * @code
- * void onFoo(const FooPayload& p);
- * using C = Command<0x01, onFoo>;  // payload_type = FooPayload
+ * // Fixed-size (backward compatible)
+ * void onSetMode(const SetModePayload& p);
+ * using SetModeCmd = Command<0x01, onSetMode>;
+ *
+ * // Variable-size with range
+ * void onConfig(const ConfigPayload& p, size_t len);
+ * using ConfigCmd = Command<0x02, onConfig, payload::SizeBetween<1, 16>>;
+ *
+ * // Custom validator
+ * DispatchError validateDiscrete(const uint8_t*, size_t len) {
+ *     return (len == 0 || len == 2 || len == 4)
+ *         ? DispatchError::none : DispatchError::invalid_payload;
+ * }
+ * using DiscreteCmd = Command<0x03, onDiscrete, payload::ValidateWith<validateDiscrete>>;
  * @endcode
  */
-template<uint8_t Opcode, auto Handler>
+template<uint8_t Opcode, auto Handler, typename SizePolicy = payload::SizeExact<>>
 struct Command : detail::message_trait::as_message_like<
     detail::message_trait::opcode<Opcode>, detail::handler_trait::payload_type<Handler>> {
     static constexpr auto handler = Handler;
+    using size_policy = SizePolicy;
 };
 
 /**
@@ -475,43 +637,70 @@ public:
     using buffer_type = uint8_t[max_message_size];
 
 private:
+    /// @brief Check if command uses fixed-size policy (SizeExact<> with N=0)
+    template<typename Cmd>
+    static constexpr bool is_fixed_size_policy_v =
+        std::is_same_v<typename Cmd::size_policy, payload::SizeExact<>>;
+
     /// @brief Try to dispatch to a single command, return true if matched
     template<typename B>
     [[gnu::always_inline]] static bool try_dispatch(uint8_t opcode, const uint8_t* payload, size_t payload_len) {
         if (opcode != B::opcode) return false;
 
-        // Opcode matched - check payload size
-        if (payload_len < B::payload_size) {
-            if constexpr (has_fallback) {
-                fallback(opcode, DispatchError::payload_too_small);
-            } else {
-                BLEX_LOG_ERROR("Dispatcher: payload too small for opcode 0x%02X "
-                              "(got %u, need %u)\n",
-                              opcode, static_cast<unsigned>(payload_len),
-                              static_cast<unsigned>(B::payload_size));
+        // Size validation has two paths:
+        // - SizeExact<> (N=0, default): Dispatcher validates against sizeof(payload_type).
+        //   Policy's validate() would just return none, so we skip calling it entirely.
+        // - All other policies (SizeExact<N>, SizeAtLeast, SizeBetween, ValidateWith, etc.):
+        //   Call the policy's validate() method which performs the actual check.
+        if constexpr (is_fixed_size_policy_v<B>) {
+            if (payload_len < B::payload_size) {
+                if constexpr (has_fallback) {
+                    fallback(opcode, DispatchError::payload_too_small);
+                } else {
+                    BLEX_LOG_ERROR("Dispatcher: payload too small for opcode 0x%02X "
+                                  "(got %u, need %u)\n",
+                                  opcode, static_cast<unsigned>(payload_len),
+                                  static_cast<unsigned>(B::payload_size));
+                }
+                return true;
             }
-            return true;
-        }
 
-        if (payload_len > B::payload_size) {
-            if constexpr (has_fallback) {
-                fallback(opcode, DispatchError::payload_too_big);
-            } else {
-                BLEX_LOG_ERROR("Dispatcher: payload too big for opcode 0x%02X "
-                             "(got %u, expected %u)\n",
-                             opcode, static_cast<unsigned>(payload_len),
-                             static_cast<unsigned>(B::payload_size));
+            if (payload_len > B::payload_size) {
+                if constexpr (has_fallback) {
+                    fallback(opcode, DispatchError::payload_too_big);
+                } else {
+                    BLEX_LOG_ERROR("Dispatcher: payload too big for opcode 0x%02X "
+                                 "(got %u, expected %u)\n",
+                                 opcode, static_cast<unsigned>(payload_len),
+                                 static_cast<unsigned>(B::payload_size));
+                }
+                return true;
             }
-            return true;
-        }
-
-        // Call handler
-        if constexpr (B::payload_size == 0) {
-            B::handler();
         } else {
-            // Safe: payload_type is validated as trivially copyable + standard layout
-            // ReSharper disable once CppRedundantTypenameKeyword
-            B::handler(*reinterpret_cast<const typename B::payload_type*>(payload));
+            const DispatchError policy_err = B::size_policy::validate(payload, payload_len);
+            if (policy_err != DispatchError::none) {
+                if constexpr (has_fallback) {
+                    fallback(opcode, policy_err);
+                } else {
+                    BLEX_LOG_ERROR("Dispatcher: size policy rejected opcode 0x%02X "
+                                  "(error %u, len %u)\n",
+                                  opcode, static_cast<unsigned>(policy_err),
+                                  static_cast<unsigned>(payload_len));
+                }
+                return true;
+            }
+        }
+
+        // Invoke handler with appropriate signature
+        if constexpr (B::payload_size == 0) {
+            // No payload - void handler
+            B::handler();
+        } else if constexpr (is_fixed_size_policy_v<B>) {
+            // Fixed-size policy: void(const Payload&)
+            B::handler(*reinterpret_cast<const B::payload_type*>(payload));
+        } else {
+            // Variable-size policy: void(const Payload&, size_t len)
+            B::handler(*reinterpret_cast<const B::payload_type*>(payload), payload_len);
         }
         return true;
     }
