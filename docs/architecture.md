@@ -51,8 +51,7 @@ BLEX follows a layered architecture with clean separation of concerns, enabling 
 ```cpp
 using MyDevice = MyBlex::Server<
     deviceName,
-    deviceNameShort,
-    MyBlex::AdvertisementConfig<>::WithTxPower<9>,
+    MyBlex::AdvertisementConfig<>::WithTxPower<9>::WithLongName<deviceNameLong>,
     MyBlex::ConnectionConfig<>::WithMTU<517>,
     MyBlex::SecurityConfig<>::WithPasskey<123456>,
     MyBlex::ServerCallbacks<>::WithOnConnect<onConnect>,

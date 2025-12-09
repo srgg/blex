@@ -381,98 +381,113 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
         > read_notify_optimization;
 
     private:
-        // Internal setValue without locking - accesses outer pChar directly
-        static void setValue_unsafe(const Base::value_type& newValue) {
-            using ValueT = Base::value_type;
-            if (auto* p = pChar) {  // Access outer scope pChar
-                if constexpr ((Base::perms_type::canNotify || Base::perms_type::canIndicate) && !Base::perms_type::canRead) {
-                    // Direct notify/indicate without storing value
-                    if constexpr (std::is_same_v<ValueT, std::string>) {
-                        if constexpr (Base::perms_type::canIndicate) {
-                            p->indicate(reinterpret_cast<const uint8_t*>(newValue.data()), newValue.size());
-                        } else {
-                            p->notify(reinterpret_cast<const uint8_t*>(newValue.data()), newValue.size());
-                        }
-                    } else if constexpr (std::is_same_v<ValueT, std::vector<uint8_t>>) {
-                        if constexpr (Base::perms_type::canIndicate) {
-                            p->indicate(newValue.data(), newValue.size());
-                        } else {
-                            p->notify(newValue.data(), newValue.size());
-                        }
-                    } else {
-                        std::array<uint8_t, sizeof(ValueT)> buf{};
-                        std::memcpy(buf.data(), &newValue, sizeof(ValueT));
-                        if constexpr (Base::perms_type::canIndicate) {
-                            p->indicate(buf.data(), buf.size());
-                        } else {
-                            p->notify(buf.data(), buf.size());
-                        }
-                    }
-                } else {
-                    // Characteristic is readable: must store value
-                    if constexpr (std::is_same_v<ValueT, std::string>) {
-                        p->setValue(newValue);
-                    } else if constexpr (std::is_same_v<ValueT, std::vector<uint8_t>>) {
-                        p->setValue(newValue.data(), newValue.size());
-                    } else {
-                        std::array<uint8_t, sizeof(ValueT)> buf{};
-                        std::memcpy(buf.data(), &newValue, sizeof(ValueT));
-                        p->setValue(buf.data(), buf.size());
-                    }
+        /**
+         * @brief Internal setValue without locking - accesses outer pChar directly
+         * @param newValue New value to set
+         * @return true if value was set, false if characteristic not registered
+         *
+         * @details Supported types (via NimBLEAttValue/NimBLECharacteristic):
+         *   - Primitive types (int, float, etc.) - copied via sizeof(T)
+         *   - std::string, Arduino String - via c_str()/length()
+         *   - std::vector<T>, std::array<T,N> - via data()/size() with proper sizeof(value_type)
+         *   - Any container with data()/size() methods
+         *   - const char* - as null-terminated string
+         */
+        static bool setValue_unsafe(const Base::value_type& newValue) {
+            auto* p = pChar;
+            if (!p) {
+                BLEX_LOG_WARN("Characteristic::setValue (UUID %s) called before registration\n",
+                    blex_nimble::make_uuid<Base::uuid>().toString().c_str());
+                return false;
+            }
 
-                    if constexpr (Base::perms_type::canIndicate) {
-                        p->indicate();
-                    } else if constexpr (Base::perms_type::canNotify) {
-                        p->notify();
-                    }
+            if constexpr ((Base::perms_type::canNotify || Base::perms_type::canIndicate) && !Base::perms_type::canRead) {
+                // Direct notify/indicate without storing value - NimBLE handles type detection
+                if constexpr (Base::perms_type::canIndicate) {
+                    p->indicate(newValue);
+                } else {
+                    p->notify(newValue);
+                }
+            } else {
+                // Characteristic is readable: store value then notify - NimBLE handles type detection
+                p->setValue(newValue);
+
+                if constexpr (Base::perms_type::canIndicate) {
+                    p->indicate();
+                } else if constexpr (Base::perms_type::canNotify) {
+                    p->notify();
                 }
             }
 
             if constexpr (use_read_notify_optimization) {
                 read_notify_optimization.notified_value_valid.store(true, std::memory_order_release);
             }
+            return true;
         }
 
-        static void setValue_unsafe(const uint8_t* data, size_t size) {
-            if (auto* p = pChar) {  // Access outer scope pChar
-                if constexpr ((Base::perms_type::canNotify || Base::perms_type::canIndicate) && !Base::perms_type::canRead) {
-                    // Direct notify/indicate without storing value
-                    if constexpr (Base::perms_type::canIndicate) {
-                        p->indicate(data, size);
-                    } else {
-                        p->notify(data, size);
-                    }
+        /**
+         * @brief Internal setValue from raw buffer without locking
+         * @param data Pointer to raw data
+         * @param size Size of data in bytes
+         * @return true if value was set, false if characteristic not registered
+         */
+        static bool setValue_unsafe(const uint8_t* data, size_t size) {
+            auto* p = pChar;
+            if (!p) {
+                BLEX_LOG_WARN("Characteristic::setValue (UUID %s) called before registration\n",
+                    blex_nimble::make_uuid<Base::uuid>().toString().c_str());
+                return false;
+            }
+
+            if constexpr ((Base::perms_type::canNotify || Base::perms_type::canIndicate) && !Base::perms_type::canRead) {
+                // Direct notify/indicate without storing value
+                if constexpr (Base::perms_type::canIndicate) {
+                    p->indicate(data, size);
                 } else {
-                    p->setValue(data, size);
-                    if constexpr (Base::perms_type::canIndicate) {
-                        p->indicate();
-                    } else if constexpr (Base::perms_type::canNotify) {
-                        p->notify();
-                    }
+                    p->notify(data, size);
+                }
+            } else {
+                p->setValue(data, size);
+                if constexpr (Base::perms_type::canIndicate) {
+                    p->indicate();
+                } else if constexpr (Base::perms_type::canNotify) {
+                    p->notify();
                 }
             }
 
             if constexpr (use_read_notify_optimization) {
                 read_notify_optimization.notified_value_valid.store(true, std::memory_order_release);
             }
+            return true;
         }
 
     public:
-        static void setValue(const typename Base::value_type& newValue) {
+        /**
+         * @brief Set characteristic value (type-safe)
+         * @param newValue New value to set
+         * @return true if value was set, false if characteristic not registered
+         */
+        static bool setValue(const typename Base::value_type& newValue) {
             if constexpr (Base::perms_type::canNotify && !Base::perms_type::canRead) {
-                setValue_unsafe(newValue);
+                return setValue_unsafe(newValue);
             } else {
                 guard_t guard;
-                setValue_unsafe(newValue);
+                return setValue_unsafe(newValue);
             }
         }
 
-        static void setValue(const uint8_t* data, size_t size) {
+        /**
+         * @brief Set characteristic value from raw buffer
+         * @param data Pointer to raw data
+         * @param size Size of data in bytes
+         * @return true if value was set, false if characteristic not registered
+         */
+        static bool setValue(const uint8_t* data, size_t size) {
             if constexpr (Base::perms_type::canNotify && !Base::perms_type::canRead) {
-                setValue_unsafe(data, size);
+                return setValue_unsafe(data, size);
             } else {
                 guard_t guard;
-                setValue_unsafe(data, size);
+                return setValue_unsafe(data, size);
             }
         }
 
@@ -559,7 +574,9 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             if constexpr (use_read_notify_optimization) {
                 if (subValue == 0) {
                     const int8_t prev = read_notify_optimization.subscriber_count.fetch_sub(1, std::memory_order_acq_rel);
-                    assert(prev > 0 && "BUG: subscriber_count went negative");
+                    if (prev <= 0) {
+                        BLEX_LOG_ERROR("BUG: subscriber_count went negative (prev=%d)\n", prev);
+                    }
                     if (prev == 1) {
                         read_notify_optimization.notified_value_valid.store(false, std::memory_order_release);
                     }
@@ -587,19 +604,21 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
     /**
      * @brief Set characteristic value and notify subscribers (type-safe)
      * @tparam LockPolicy Lock implementation (FreeRTOSLock for multi-core, NoLock for single-core)
+     * @return true if value was set, false if characteristic not registered
      */
     template<template<typename> class LockPolicy>
-    static void setValue(const T& newValue) {
-        Shim<LockPolicy>::setValue(newValue);
+    static bool setValue(const T& newValue) {
+        return Shim<LockPolicy>::setValue(newValue);
     }
 
     /**
      * @brief Set characteristic value from raw buffer
      * @note Used for array/struct types
+     * @return true if value was set, false if characteristic not registered
      */
     template<template<typename> class LockPolicy>
-    static void setValue(const uint8_t* data, size_t size) {
-        Shim<LockPolicy>::setValue(data, size);
+    static bool setValue(const uint8_t* data, size_t size) {
+        return Shim<LockPolicy>::setValue(data, size);
     }
 
     // ---------------------- Backend Registration ----------------------
@@ -643,7 +662,7 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             properties |= NIMBLE_PROPERTY::READ;  // Always set a base flag for property advertisement
 
             if constexpr (PermsType::read_security >= 4) {
-                properties |= NIMBLE_PROPERTY::READ_AUTHOR ;
+                properties |= NIMBLE_PROPERTY::READ_AUTHOR;
                 BLEX_LOG_DEBUG("    char: READ | READ_AUTHOR\n");
             } else if constexpr (PermsType::read_security >= 3) {
                 properties |= NIMBLE_PROPERTY::READ_AUTHEN;
@@ -663,7 +682,7 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
 
             // Mapping for macOS / BLE spec
             if constexpr (PermsType::write_security >= 4) {
-                properties |= NIMBLE_PROPERTY::WRITE_AUTHOR;;
+                properties |= NIMBLE_PROPERTY::WRITE_AUTHOR;
                 BLEX_LOG_DEBUG("    char: WRITE | WRITE_AUTHOR\n");
             } else if constexpr (PermsType::write_security >= 3) {
                 properties |= NIMBLE_PROPERTY::WRITE_AUTHEN;
@@ -836,6 +855,59 @@ private:
     static constexpr bool is_aggregate_format = decltype(check_aggregate_format<Desc>(0))::value;
 
 public:
+    /// @brief NimBLE descriptor handle (valid after register_to_char(), nullptr before)
+    inline static NimBLEDescriptor* pDesc = nullptr;
+
+    /**
+     * @brief Set descriptor value at runtime
+     * @tparam LockPolicy Lock implementation (FreeRTOSLock for multi-core, NoLock for single-core)
+     * @param value New value to set
+     * @return true if value was set, false if descriptor not registered
+     *
+     * @details Supported types (via NimBLEAttValue):
+     *   - Primitive types (int, float, etc.) - copied via sizeof(T)
+     *   - std::string, Arduino String - via c_str()/length()
+     *   - std::vector<T>, std::array<T,N> - via data()/size() with proper sizeof(value_type)
+     *   - Any container with data()/size() methods
+     *   - const char* - as null-terminated string
+     */
+    template<template<typename> class LockPolicy>
+    static bool setValue(const typename Desc::Base::value_type& value) {
+        using Base = typename Desc::Base;
+
+        blex_sync::ScopedLock<LockPolicy, Base> guard;
+
+        if (!pDesc) {
+            BLEX_LOG_WARN("Descriptor::setValue (UUID %s) called before registration\n",
+                blex_nimble::make_uuid<Base::uuid>().toString().c_str());
+            return false;
+        }
+        pDesc->setValue(value);
+        return true;
+    }
+
+    /**
+     * @brief Set descriptor value from raw buffer
+     * @tparam LockPolicy Lock implementation
+     * @param data Pointer to raw data
+     * @param size Size of data in bytes
+     * @return true if value was set, false if descriptor not registered
+     */
+    template<template<typename> class LockPolicy>
+    static bool setValue(const uint8_t* data, size_t size) {
+        using Base = typename Desc::Base;
+
+        blex_sync::ScopedLock<LockPolicy, Base> guard;
+
+        if (!pDesc) {
+            BLEX_LOG_WARN("Descriptor::setValue (UUID %s) called before registration\n",
+                blex_nimble::make_uuid<Base::uuid>().toString().c_str());
+            return false;
+        }
+        pDesc->setValue(data, size);
+        return true;
+    }
+
     static NimBLEDescriptor* register_to_char(NimBLECharacteristic* pChar) {
         // Delegate to Base specialization for presentation format descriptors
         if constexpr (is_presentation_format) {
@@ -856,6 +928,9 @@ public:
                 (Base::perms_type::canRead ? NIMBLE_PROPERTY::READ : 0) |
                 (Base::perms_type::canWrite ? NIMBLE_PROPERTY::WRITE : 0),
                 Base::max_size);
+
+            // Store descriptor handle for dynamic value updates
+            pDesc = desc;
 
             // Set value for const descriptors (checked via is_const_descriptor flag)
             if constexpr (is_const_descriptor) {
@@ -1111,7 +1186,7 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
     // ---------------------- Advertising Control ----------------------
 
     static void startAdvertising() {
-        BLEX_LOG_DEBUG("Staring advertisement...\n");
+        BLEX_LOG_DEBUG("Starting advertisement...\n");
         NimBLEDevice::startAdvertising();
         BLEX_LOG_INFO("Advertising started\n");
     }

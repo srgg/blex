@@ -195,7 +195,7 @@ using ImuDevice = blx::Server<
         ::WithSecureConnections<true>,
     blx::ActiveAdvService<DeviceInfoService<blx>>,
     IMUService,
-    blx::PassiveAdvService<OtaService<blx>>
+    blx::PassiveAdvService<ota::OtaService<blx>>
 >;
 
 bool setup_ble() {

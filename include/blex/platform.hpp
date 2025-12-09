@@ -163,10 +163,11 @@ class ScopedLock {
     using Lock = LockPolicy<Tag>;
 
     [[gnu::always_inline]]
-      static Lock& getLock() noexcept {
-        // Leak-on-purpose to avoid static destruction order issues
-        static Lock* lock = new Lock();
-        return *lock;
+    static Lock& getLock() noexcept {
+        // C++11 function-local static: thread-safe init, persists for program lifetime
+        // No destructor concerns - Lock types have trivial/empty destructors
+        static Lock lock;
+        return lock;
     }
 public:
     ScopedLock() noexcept  { getLock().lock(); }

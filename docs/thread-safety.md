@@ -3,7 +3,7 @@
 ## Thread Safety Design
 
 - **Zero-overhead:** eliminates unnecessary locks on critical data paths.
-- **Pluggable lock policy:** Includes built-in <a href="#nolock">NoLock</a> and <a href="#free-rtos-lock">FreeRTOSLock</a> options.
+- **Pluggable lock policy:** Includes built-in [NoLock](#lock-policy) and [FreeRTOSLock](#lock-policy) options.
 
 The lock strategy uses a policy-based design and compile-time polymorphism, as shown in the following example:
 ```c++
@@ -19,12 +19,12 @@ using MultiCoreBlex = blex<FreeRTOSLock>;
 using SingleCoreBlex = blex<NoLock>;
 
 // Explicit selection for a custom lock policy
-using SingleCoreBlex = blex<MyCustomLockPolicy>;
+using CustomBlex = blex<MyCustomLockPolicy>;
 ```
 
 **Note:** Custom lock policies are supported, as described below.
 
-# Synchronization Guarantees
+## Synchronization Guarantees
 
 This section outlines the concurrency and threading model used by Blex.
 Blex is built on **NimBLE** and inherits its execution and synchronization behavior.
@@ -70,8 +70,8 @@ Lock policy is a platform-specific synchronization abstraction that defines when
 Locks are acquired and released through the `lock()` and `unlock()` methods.
 
 **Built-in Lock Policies:**
-NoLock: has a zero overhead. Use for single-core systems or when thread safety is guaranteed.
-FreeRTOSLock: Uses a FreeRTOS recursive mutex for task-context locking. Use this on multicore or RTOS-based systems to ensure callback safety, unless you provide synchronization by other means.
+- **NoLock:** Zero overhead. Use for single-core systems or when application code handles synchronization without relying on BLEX.
+- **FreeRTOSLock:** Uses a FreeRTOS recursive mutex. Use on multi-core or RTOS-based systems.
 
 ```cpp
 template<typename Tag = void>

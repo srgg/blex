@@ -112,13 +112,6 @@
 // ---------------------- Final Descriptor Types (Base + Backend) ----------------------
 
 /**
- * @brief Generic descriptor (backend-integrated)
- */
-template<typename T, auto UUID, typename Perms = Permissions<>::AllowRead, size_t MaxSize = sizeof(T)>
-struct Descriptor : DescriptorBase<T, UUID, Perms, MaxSize> {
-};
-
-/**
  * @brief Const descriptor with compile-time value
  * @note Size calculated automatically from Value
  */
@@ -268,8 +261,43 @@ struct blex {
     template<typename... PresentationFormatDescriptors>
     using AggregateFormatDescriptor = AggregateFormatDescriptor<PresentationFormatDescriptors...>;
 
+    /**
+     * @brief Generic descriptor with runtime value support (backend-integrated)
+     * @details Supports dynamic value updates via setValue() after registration.
+     *          Use ConstDescriptor for compile-time constant values.
+     *
+     * @tparam T Value type
+     * @tparam UUID Descriptor UUID (uint16_t or const char*)
+     * @tparam Perms Permissions<...> type from builder
+     * @tparam MaxSize Maximum value size in bytes (default: sizeof(T))
+     */
     template<typename T, auto UUID, typename Perms = Permissions<>::AllowRead, size_t MaxSize = sizeof(T)>
-    using Descriptor = Descriptor<T, UUID, Perms, MaxSize>;
+    struct Descriptor : DescriptorBase<T, UUID, Perms, MaxSize, Descriptor<T, UUID, Perms, MaxSize>> {
+        using Backend = DescriptorBackend<Descriptor>;
+
+        /**
+         * @brief Set descriptor value at runtime
+         * @tparam LP Lock implementation (default: inherited from blex<LockPolicy>)
+         * @param value New value to set
+         * @return true if value was set, false if descriptor not registered
+         */
+        template<template<typename> class LP = LockPolicy>
+        static bool setValue(const T& value) {
+            return Backend::template setValue<LP>(value);
+        }
+
+        /**
+         * @brief Set descriptor value from raw buffer
+         * @tparam LP Lock implementation (default: inherited from blex<LockPolicy>)
+         * @param data Pointer to raw data
+         * @param size Size of data in bytes
+         * @return true if value was set, false if descriptor not registered
+         */
+        template<template<typename> class LP = LockPolicy>
+        static bool setValue(const uint8_t* data, size_t size) {
+            return Backend::template setValue<LP>(data, size);
+        }
+    };
 
     // Re-export ConstCharacteristic from global scope
     template<typename T, auto UUID, T Value, typename... Descriptors>
@@ -289,18 +317,20 @@ struct blex {
 
         /**
          * @brief Set value and notify (delegate to backend)
+         * @return true if value was set, false if characteristic not registered
          */
         template<template<typename> class LP = LockPolicy>
-        static void setValue(const T& newValue) {
-            Backend::template setValue<LP>(newValue);
+        static bool setValue(const T& newValue) {
+            return Backend::template setValue<LP>(newValue);
         }
 
         /**
          * @brief Set value from raw buffer (delegate to backend)
+         * @return true if value was set, false if characteristic not registered
          */
         template<template<typename> class LP = LockPolicy>
-        static void setValue(const uint8_t* data, size_t size) {
-            Backend::template setValue<LP>(data, size);
+        static bool setValue(const uint8_t* data, size_t size) {
+            return Backend::template setValue<LP>(data, size);
         }
 
         /**

@@ -51,7 +51,7 @@ Create a simple BLE server with Device Information Service in just a few lines:
 #include <services/device_info.hpp>
 
 // Define device name
-constexpr const char* deviceName = "MyBLEDevice";
+inline constexpr char deviceName[] = "MyBLEDevice";
 
 // Create BLE server with Device Info service
 using MyBlex = blexDefault;  // Uses default settings (FreeRTOSLock)
@@ -87,8 +87,8 @@ void loop() {
 
 See the `examples/` directory for complete working examples:
 
-- **[basic_server](examples/basic_server/)** - Minimal BLE server setup (start here!)
-- **[simple_server](examples/simple_server/)** - Simple server with custom characteristics
+- **[simple_server](examples/simple_server/)** - Minimal BLE server setup (start here!)
+- **[basic_server](examples/basic_server/)** - Server with callbacks, descriptors, and OTA
 - **[imu_streamer](examples/imu_streamer/)** - High-frequency sensor data streaming
 
 Each example includes complete source code with inline documentation.
@@ -118,10 +118,11 @@ All BLEX configuration happens at **compile-time**, resulting in zero runtime ov
 
 ```cpp
 // This configuration produces optimized code with no runtime branching
-MyBlex::Server<deviceName>
-    ::WithAdvertising<>
+using MyServer = MyBlex::Server<deviceName,
+    MyBlex::AdvertisementConfig<>
         ::WithTxPower<9>
-        ::WithAdvertisingInterval<100, 200>
+        ::WithIntervals<100, 200>
+>;
 ```
 
 #### 3. Built-in Services
@@ -130,7 +131,6 @@ BLEX provides ready-to-use standard BLE services:
 
 - **Device Information Service (0x180A)** - Manufacturer, model, firmware version, serial number
 - **OTA/DFU Service** - Over-the-air firmware updates (Nordic DFU compatible)
-- **Manufacturer Data** - Custom advertising data
 
 See [Built-in Services Documentation](docs/built-in-services.md) for details.
 
@@ -156,16 +156,6 @@ MyDispatcher::dispatch(data, len);
 ```
 
 See `services/ota.hpp` for a complete usage example (Nordic DFU protocol implementation).
-
-#### 5. Service Visibility
-
-Control how services are advertised to central devices:
-
-```cpp
-MyBlex::PassiveAdvService<DeviceInfoService<MyBlex>>  // Advertised passively (all scanners)
-MyBlex::ActiveAdvService<BatteryService<MyBlex>>      // Advertised on scan request
-CustomService<MyBlex>                                 // Not advertised (GATT discovery only)
-```
 
 ## Creating Custom Services
 
@@ -300,12 +290,12 @@ Configure device names for advertising and scan response:
 
 ```cpp
 // Short name only (used for both advertising and scan response)
-constexpr char shortName[] = "MyDevice";
+inline constexpr char shortName[] = "MyDevice";
 using MyServer = MyBlex::Server<shortName>;
 
 // Separate short and long names using AdvertisementConfig
-constexpr char shortName[] = "MyDevice";
-constexpr char longName[] = "My Device Full Name";
+inline constexpr char shortName[] = "MyDevice";
+inline constexpr char longName[] = "My Device Full Name";
 using MyServer = MyBlex::Server<shortName,
     MyBlex::AdvertisementConfig<>::WithLongName<longName>
 >;
@@ -342,12 +332,11 @@ Control how services appear to BLE scanners:
 - **Not advertised**: Discoverable only via GATT service discovery after connection
 
 ```cpp
-MyBlex::Server<
-    /* ... config ... */,
+using MyServer = MyBlex::Server<deviceName,
     MyBlex::PassiveAdvService<DeviceInfoService<MyBlex>>,  // ADV_IND (all scanners)
     MyBlex::ActiveAdvService<BatteryService<MyBlex>>,      // SCAN_RSP (active scanners only)
     CustomService<MyBlex>                                  // Not advertised (GATT only)
->
+>;
 ```
 
 **When to use each:**
@@ -370,8 +359,21 @@ AdvertisementConfig<>
     ::WithTxPower<9>                    // TX power in dBm (-12 to 9)
     ::WithAppearance<kGenericComputer>  // BLE appearance (see BleAppearance)
     ::WithIntervals<100, 200>           // Min/max advertising intervals (0.625ms units)
-    ::WithManufacturerData<data>        // Custom manufacturer data
+    ::WithManufacturerData<data>        // Custom manufacturer data (see below)
     ::WithLongName<longName>            // Long/full device name for scan response (optional)
+```
+
+**Manufacturer Data** - two modes:
+```cpp
+// Raw mode: pass your own byte array
+inline constexpr uint8_t myData[] = {0x34, 0x12, 0x01, 0x02};
+::WithManufacturerData<myData>
+
+// Builder mode: construct with helpers
+::WithManufacturerData<>
+    ::WithManufacturerId<0x1234>        // Required
+    ::WithDeviceType<0x02>              // Optional TLV helper
+    ::WithTLV<0x03, 0xAA, 0xBB>         // Optional custom TLV
 ```
 
 ### ConnectionConfig
@@ -437,6 +439,19 @@ void onWrite(const ValueType& value, NimBLEConnInfo& conn);  // or raw: (const u
 void onStatus(NimBLECharacteristic* pChar, int code);
 void onSubscribe(uint16_t subValue, NimBLEConnInfo& conn);
 ```
+
+### Characteristic / Descriptor setValue
+
+```cpp
+MyChar::setValue(value);              // Set typed value, notify if subscribed
+MyChar::setValue(data, size);         // Set from raw buffer
+MyDescriptor::setValue(value);        // Set typed value
+MyDescriptor::setValue(data, size);   // Set from raw buffer
+```
+
+**Returns:** `bool` - `false` if not registered
+
+**Supported types:** primitives, `std::string`, `String`, `std::vector<T>`, `std::array<T,N>`, `const char*`, fixed arrays
 
 ## Architecture
 

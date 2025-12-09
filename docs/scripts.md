@@ -217,7 +217,7 @@ positional arguments:
 optional arguments:
   -d, --device ADDR     BLE device MAC address
   -n, --name NAME       BLE device name (triggers scan)
-  -p, --prn-interval N  Packet receipt notification interval (default: 16)
+  -p, --prn-interval N  Packet receipt notification interval (default: 32)
   -v, --verbose         Enable verbose logging
 ```
 
