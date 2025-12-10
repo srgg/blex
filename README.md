@@ -134,29 +134,6 @@ BLEX provides ready-to-use standard BLE services:
 
 See [Built-in Services Documentation](docs/built-in-services.md) for details.
 
-#### 4. Binary Command Dispatcher
-
-For implementing binary protocols over BLE characteristics, BLEX includes a zero-allocation command dispatcher:
-
-- **Opcode-based dispatch** - Route commands by opcode to typed handlers
-- **Compile-time validation** - Payload sizes and alignment checked at compile time
-- **Zero heap allocation** - Static buffers sized automatically from command definitions
-
-```cpp
-#include <blex/binary_command.hpp>
-
-using MyDispatcher = blex_binary_command::Dispatcher<
-    blex_binary_command::Command<0x01, [](const CreatePayload& p) { /* handle */ }>,
-    blex_binary_command::Command<0x02, [](const QueryPayload& p) { /* handle */ }>,
-    blex_binary_command::Fallback<[](uint8_t opcode, auto error) { /* handle unknown */ }>
->;
-
-// In characteristic write handler:
-MyDispatcher::dispatch(data, len);
-```
-
-See `services/ota.hpp` for a complete usage example (Nordic DFU protocol implementation).
-
 ## Creating Custom Services
 
 ### Simple Custom Service
@@ -284,27 +261,31 @@ MyServer::restoreDefaultConnectionParams(conn_handle);
 - **macOS/iOS**: Often ignores peripheral requests; central controls intervals
 - **Android**: Usually honors requests within allowed ranges
 
-### Device Naming
+### Characteristic Subscription Queries
 
-Configure device names for advertising and scan response:
+Check which clients have subscribed to a characteristic's notifications or indications:
 
 ```cpp
-// Short name only (used for both advertising and scan response)
-inline constexpr char shortName[] = "MyDevice";
-using MyServer = MyBlex::Server<shortName>;
+// Count subscribers
+uint8_t total = MyChar::getSubscriberCount();                                 // All subscribers
+uint8_t notifyOnly = MyChar::getSubscriberCount(SubscriptionFilter::Notify);  // Notifications only
 
-// Separate short and long names using AdvertisementConfig
-inline constexpr char shortName[] = "MyDevice";
-inline constexpr char longName[] = "My Device Full Name";
-using MyServer = MyBlex::Server<shortName,
-    MyBlex::AdvertisementConfig<>::WithLongName<longName>
->;
+// Iterate with full connection details
+MyChar::forEachSubscriber([](const SubscriptionInfo& info) {
+    Serial.printf("Client %s: notify=%d, indicate=%d\n",
+        info.connInfo.getAddress().toString().c_str(),
+        info.isNotifySubscribed,
+        info.isIndicateSubscribed);
+});
 ```
 
-**BLE naming behavior:**
-- **Short name**: Appears in advertising packet (limited space, required)
-- **Long name**: Appears in scan response (more space, optional via `AdvertisementConfig::WithLongName<>`)
-- If a long name is not provided, the short name is used for both advertising and scan response
+**Filter options:** `SubscriptionFilter::Any` (default), `Notify`, `Indicate`
+
+**`SubscriptionInfo` fields:**
+- `connInfo` - Full `NimBLEConnInfo` (address, handle, MTU, security state, etc.)
+- `isNotifySubscribed` / `isIndicateSubscribed` - Subscription flags
+
+**Tip:** Return `false` from the callback to exit iteration early.
 
 ## Advanced Topics
 
@@ -350,6 +331,30 @@ For sensor data streaming and real-time applications, BLEX provides optimized no
 
 See [High-Frequency Streaming Guide](docs/high-frequency-streaming.md) for detailed performance characteristics, optimization strategies, and implementation patterns.
 
+### Binary Command Dispatcher
+
+For implementing binary protocols over BLE characteristics, BLEX includes a zero-allocation command dispatcher:
+
+```cpp
+#include <blex/binary_command.hpp>
+
+using MyDispatcher = blex_binary_command::Dispatcher<
+    blex_binary_command::Command<0x01, [](const CreatePayload& p) { /* handle */ }>,
+    blex_binary_command::Command<0x02, [](const QueryPayload& p) { /* handle */ }>,
+    blex_binary_command::Fallback<[](uint8_t opcode, auto error) { /* handle unknown */ }>
+>;
+
+// In characteristic write handler:
+MyDispatcher::dispatch(data, len);
+```
+
+**Features:**
+- Opcode-based dispatch to typed handlers
+- Compile-time payload size and alignment validation
+- Zero heap allocation (static buffers sized from command definitions)
+
+See `services/ota.hpp` for a complete usage example (Nordic DFU protocol implementation).
+
 ## API Reference
 
 ### AdvertisementConfig
@@ -362,6 +367,23 @@ AdvertisementConfig<>
     ::WithManufacturerData<data>        // Custom manufacturer data (see below)
     ::WithLongName<longName>            // Long/full device name for scan response (optional)
 ```
+
+**Device naming:** The server's first template parameter is the short name (required), which appears in the advertising packet. Optionally, use `WithLongName<>` to provide an extended name in the 'active' scan response.
+
+```cpp
+// Short name only (used for both advertising and scan response)
+inline constexpr char shortName[] = "MyDevice";
+using MyServer = MyBlex::Server<shortName>;
+
+// Separate short and long names
+inline constexpr char shortName[] = "MyDev";
+inline constexpr char longName[] = "My Device Full Name";
+using MyServer = MyBlex::Server<shortName,
+    MyBlex::AdvertisementConfig<>::WithLongName<longName>
+>;
+```
+
+If the long name is omitted, the short name is used for both.
 
 **Manufacturer Data** - two modes:
 ```cpp
@@ -378,6 +400,8 @@ inline constexpr uint8_t myData[] = {0x34, 0x12, 0x01, 0x02};
 
 ### ConnectionConfig
 
+Configure BLE connection parameters to balance throughput, latency, and power consumption:
+
 ```cpp
 ConnectionConfig<>
     ::WithMTU<517>                      // Maximum MTU size (23-517)
@@ -387,6 +411,9 @@ ConnectionConfig<>
 ```
 
 ### SecurityConfig
+
+`SecurityConfig` lets you define how your device handles BLE pairing, authentication, and encryption.
+Each option is added using a fluent builder:
 
 ```cpp
 SecurityConfig<>
@@ -406,12 +433,15 @@ SecurityConfig<>
 
 ### ServerCallbacks
 
+`ServerCallbacks` lets you attach handlers for important server-side BLE events.
+These callbacks notify your application when a device connects, disconnects, or when link settings change.
+
 ```cpp
 ServerCallbacks<>
-    ::WithOnConnect<onConnect>
-    ::WithOnDisconnect<onDisconnect>
-    ::WithOnMTUChange<onMTUChange>
-    ::WithOnConnParamsUpdate<onConnParamsUpdate>
+    ::WithOnConnect<onConnect>                      // Called when a central connects
+    ::WithOnDisconnect<onDisconnect>                // Called when a central disconnects
+    ::WithOnMTUChange<onMTUChange>                  // MTU updated (e.g., 23 → larger)
+    ::WithOnConnParamsUpdate<onConnParamsUpdate>    // Connection interval/latency update
 ```
 
 **Callback signatures:**
@@ -424,13 +454,22 @@ void onConnParamsUpdate(NimBLEConnInfo& conn);
 
 ### CharacteristicCallbacks
 
+CharacteristicCallbacks lets you react to operations on a specific BLE characteristic.
+Use these callbacks to control reads/writes, track subscription state, and monitor notification delivery.
+
 ```cpp
 CharacteristicCallbacks<>
-    ::WithOnRead<onRead>
-    ::WithOnWrite<onWrite>
-    ::WithOnStatus<onStatus>
-    ::WithOnSubscribe<onSubscribe>
+    ::WithOnRead<onRead>            // Called right before the value is sent to the client
+    ::WithOnWrite<onWrite>          // Called when the client writes new data
+    ::WithOnStatus<onStatus>        // Notification/indication delivery result
+    ::WithOnSubscribe<onSubscribe>  // Client subscribes or unsubscribes to notifications
 ```
+
+**Handler details:**
+- **WithOnRead** — Triggered just before your characteristic's value is sent to the central device. Use this to update the value dynamically or perform access checks.
+- **WithOnWrite** — Called when the central writes data into your characteristic. Ideal for parsing commands, validating input, or updating internal state.
+- **WithOnStatus** — Reports the delivery status of notifications or indications—useful for reliability checks or flow control.
+- **WithOnSubscribe** — Notifies you when the central subscribes or unsubscribes from notifications/indications. Use this to start/stop periodic updates or manage resource usage.
 
 **Callback signatures:**
 ```cpp
@@ -440,24 +479,38 @@ void onStatus(NimBLECharacteristic* pChar, int code);
 void onSubscribe(uint16_t subValue, NimBLEConnInfo& conn);
 ```
 
-### Characteristic / Descriptor setValue
+### setValue
+
+Use `setValue` to update the value of a characteristic or descriptor from your code.
+For characteristics, updating the value automatically sends a notification if a client is subscribed.
 
 ```cpp
-MyChar::setValue(value);              // Set typed value, notify if subscribed
-MyChar::setValue(data, size);         // Set from raw buffer
-MyDescriptor::setValue(value);        // Set typed value
-MyDescriptor::setValue(data, size);   // Set from raw buffer
+MyChar::setValue(value);              // Set a typed value (auto-notifies if subscribed)
+MyChar::setValue(data, size);         // Set value from a raw buffer
+MyDescriptor::setValue(value);        // Set a typed value
+MyDescriptor::setValue(data, size);   // Set from a raw buffer
 ```
 
-**Returns:** `bool` - `false` if not registered
+**Returns:** `bool` — `false` if the characteristic or descriptor has not been registered.
 
-**Supported types:** primitives, `std::string`, `String`, `std::vector<T>`, `std::array<T,N>`, `const char*`, fixed arrays
+**Supported input types**
+- Primitive types (`int`, `float`, `bool`, etc.)
+- `std::string`
+- `Arduino String`
+- `std::vector<T>`
+- `std::array<T, N>`
+- `const char*`
+- Fixed-size C arrays (e.g., `uint8_t data[16]`)
+
+**Note that:**
+- Typed overloads handle serialization for you. For example, `setValue(42)` or `setValue(std::string("OK"))` “just works as is.”
+- The raw-buffer overload (`setValue(data, size)`) is useful when you already have bytes prepared (e.g., a struct, sensor packet, or binary protocol).
 
 ## Architecture
 
 BLEX follows a layered architecture with clean separation of concerns. Each layer has well-defined responsibilities and interfaces, enabling maintainability, testability, and potential backend portability.
 
-See [Architecture Documentation](docs/architecture.md) for detailed layer descriptions, design patterns, extension points, and performance considerations.
+See [Architecture Documentation](docs/architecture.md) for detailed descriptions of layers, design patterns, extension points, and performance considerations.
 
 ## Troubleshooting
 
