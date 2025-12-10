@@ -784,6 +784,65 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
         return blex_nimble::restoreDefaultConnectionParams(server, conn_handle);
     }
 
+    // ---------------------- Subscription Query API ----------------------
+
+    /**
+     * @brief Iterate over subscribed connections with filtering
+     * @tparam Callback Invocable with (const SubscriptionInfo&), optionally returns bool
+     * @param callback Called for each matching subscriber; return false to stop iteration
+     * @param filter Which subscription types to include (default: Any)
+     * @note Callback returning void is treated as "continue iteration"
+     */
+    template<typename Callback>
+    static void forEachSubscriber(Callback&& callback, SubscriptionFilter filter = SubscriptionFilter::Any) {
+        if (!pChar) return;
+
+        NimBLEServer* server = getServer();
+        if (!server) return;
+
+        const auto subscribers = pChar->getSubscribers();
+        for (const auto& entry : subscribers) {
+            const uint16_t handle = entry.getConnHandle();
+            if (handle == BLE_HS_CONN_HANDLE_NONE) continue;
+
+            const bool isNotify = entry.isSubNotify();
+            const bool isIndicate = entry.isSubIndicate();
+
+            // Apply filter
+            if (filter == SubscriptionFilter::Notify && !isNotify) continue;
+            if (filter == SubscriptionFilter::Indicate && !isIndicate) continue;
+            if (filter == SubscriptionFilter::Any && !isNotify && !isIndicate) continue;
+
+            // Build SubscriptionInfo with full connection details
+            SubscriptionInfo info{
+                .connInfo = server->getPeerInfo(handle),
+                .isNotifySubscribed = isNotify,
+                .isIndicateSubscribed = isIndicate
+            };
+
+            // Invoke callback - support both void and bool return types
+            if constexpr (std::is_same_v<std::invoke_result_t<Callback, const SubscriptionInfo&>, bool>) {
+                if (!callback(info)) return;  // Early exit if callback returns false
+            } else {
+                callback(info);
+            }
+        }
+    }
+
+    /**
+     * @brief Count subscribers matching the filter
+     * @param filter Which subscription types to count (default: Any)
+     * @return Number of matching subscribers
+     */
+    [[nodiscard]]
+    static uint8_t getSubscriberCount(SubscriptionFilter filter = SubscriptionFilter::Any) {
+        uint8_t count = 0;
+        forEachSubscriber([&count](const SubscriptionInfo&) {
+            ++count;
+        }, filter);
+        return count;
+    }
+
 private:
     /// @brief Get NimBLE server from characteristic's service
     static NimBLEServer* getServer() {

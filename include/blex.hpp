@@ -100,6 +100,32 @@
 
 #include "blex/platform.hpp"
 #include "blex/core.hpp"
+
+// ---------------------- Subscription Query Types ----------------------
+// Forward declarations needed by nimble.hpp CharacteristicBackend
+
+/**
+ * @brief Subscription filter flags for characteristic subscriber queries
+ * @details Used with forEachSubscriber(), hasSubscribers(), getSubscriberCount()
+ *          to filter by notification and/or indication subscription type.
+ */
+enum class SubscriptionFilter : uint8_t {
+    Notify   = 1 << 0,            ///< Include connections subscribed for notifications
+    Indicate = 1 << 1,            ///< Include connections subscribed for indications
+    Any      = Notify | Indicate  ///< Include any subscription type (default)
+};
+
+/**
+ * @brief Subscription state for a single connection
+ * @details Returned by forEachSubscriber() callback, contains full connection
+ *          info plus subscription flags for the queried characteristic.
+ */
+struct SubscriptionInfo {
+    NimBLEConnInfo connInfo;      ///< Full connection info (address, handle, MTU, security, etc.)
+    bool isNotifySubscribed;      ///< Client subscribed for notifications
+    bool isIndicateSubscribed;    ///< Client subscribed for indications
+};
+
 #include "blex/nimble.hpp"
 #include "blex/standard.hpp"
 #include "blex/log.h"
@@ -367,6 +393,30 @@ struct blex {
          */
         static bool restoreDefaultConnectionParams(uint16_t conn_handle) {
             return Backend::restoreDefaultConnectionParams(conn_handle);
+        }
+
+        // ---------------------- Subscription Query API ----------------------
+
+        /**
+         * @brief Iterate over subscribed connections with filtering
+         * @tparam Callback Invocable with (const SubscriptionInfo&), optionally returns bool
+         * @param callback Called for each matching subscriber; return false to stop iteration
+         * @param filter Which subscription types to include (default: Any)
+         * @note Callback returning void is treated as "continue iteration"
+         */
+        template<typename Callback>
+        static void forEachSubscriber(Callback&& callback, SubscriptionFilter filter = SubscriptionFilter::Any) {
+            Backend::forEachSubscriber(std::forward<Callback>(callback), filter);
+        }
+
+        /**
+         * @brief Count subscribers matching the filter
+         * @param filter Which subscription types to count (default: Any)
+         * @return Number of matching subscribers
+         */
+        [[nodiscard]]
+        static uint8_t getSubscriberCount(SubscriptionFilter filter = SubscriptionFilter::Any) {
+            return Backend::getSubscriberCount(filter);
         }
     };
 
