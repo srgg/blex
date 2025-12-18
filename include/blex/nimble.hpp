@@ -199,13 +199,20 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
     }
 
     /**
-     * @brief Start the service (makes it visible in GATT table)
+     * @brief Start the service (makes it visible in the GATT table)
      * @return true if successful, false if service not registered
      */
     static bool start() {
         if (!pService) {
             BLEX_LOG_ERROR("Service not registered (pService is null)\n");
             return false;
+        }
+
+        // If service was removed (hidden), re-add it to make it visible
+        if (pService->getRemoved() > 0) {
+            if (NimBLEServer* server = getServer()) {
+                server->addService(pService);  // Clears removed flag + triggers serviceChanged
+            }
         }
 
         if (!pService->isStarted()) {
