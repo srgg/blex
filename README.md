@@ -201,22 +201,24 @@ struct TemperatureSensor : Blex::template Service<
 
 ### Service Management
 
-Control services dynamically at runtime:
+Control service visibility at runtime:
 
 ```cpp
-// Start/stop individual services
-MyService::start();      // Add service to server
-MyService::stop();       // Remove service (can be re-added later)
-MyService::isStarted();  // Check if service is active
+// Show/hide individual services
+MyService::start();      // Make service visible to BLE clients
+MyService::stop();       // Hide service (keeps state, can be re-shown)
+MyService::isStarted();  // Check if service is visible
 
-// Start/stop all services
-MyServer::startAllServices();  // Start all services + advertising
-MyServer::stopAllServices();   // Stop all services
+// Show/hide all services
+MyServer::startAllServices();  // Show all services + start advertising
+MyServer::stopAllServices();   // Hide all services
 ```
 
+> **Note:** Services are registered and started internally during `startAllServices()`.
+> The `start()/stop()` methods control visibility, not the underlying service state.
+
 **Use cases:**
-- Dynamic service activation based on device state
-- Power management (disable unused services)
+- Dynamically hide/unhide services based on device state or power consumption
 - Conditional feature exposure
 
 ### Advertising Control

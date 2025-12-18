@@ -429,15 +429,16 @@ struct blex {
         using Backend = ServiceBackend<ServiceBase<UUID, Service, Chars...>>;
 
         /**
-         * @brief Start the service (add to server if removed)
+         * @brief Make service visible to BLE clients
          * @return true if successful, false if service not registered
+         * @note Re-shows service if previously hidden via stop()
          */
         static bool start() {
             return Backend::start();
         }
 
         /**
-         * @brief Stop the service (remove from server but keep for re-adding)
+         * @brief Hide service from BLE clients (keeps state for re-showing)
          * @return true if successful, false if service not found
          */
         static bool stop() {
@@ -445,8 +446,8 @@ struct blex {
         }
 
         /**
-         * @brief Check if the service is currently started
-         * @return true if started, false otherwise
+         * @brief Check if service is visible to BLE clients
+         * @return true if visible, false if hidden or not registered
          */
         [[nodiscard]]
         static bool isStarted() {
@@ -664,7 +665,7 @@ struct blex {
         // ---------------------- Service Management ----------------------
 
         /**
-         * @brief Start all registered services (auto-initializes if not already initialized)
+         * @brief Start all services and advertising (auto-initializes if needed)
          * @return true if all services started successfully, false otherwise
          */
         static bool startAllServices() {
@@ -672,7 +673,7 @@ struct blex {
             // Auto-initialize and configure if needed
             if (!ensure_configured()) return false;
 
-            // Start all services
+            // Ensure all services are visible
             bool all_success = true;
             [&]<typename... Services>(ServicesPack<Services...>) {
                 ((blex_core::unwrap_service_impl<Services>::type::start() || (all_success = false, false)), ...);
@@ -686,8 +687,8 @@ struct blex {
         }
 
         /**
-         * @brief Stop all running services
-         * @return true if all services stopped successfully, false otherwise
+         * @brief Hide all services from BLE clients
+         * @return true if all services hidden successfully, false otherwise
          */
         static bool stopAllServices() {
             bool all_success = true;

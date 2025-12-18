@@ -177,9 +177,13 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
     inline static NimBLEService* pService = nullptr;
 
     /**
-     * @brief Register service and all its characteristics to NimBLE server
-     * @tparam LockPolicy Lock implementation to use for characteristics
-     * @param server NimBLE server pointer
+     * @brief Register service with NimBLE and add to GATT table
+     *
+     * Services must be started before ble_gatts_start() commits the GATT table
+     * (triggered by first startAdvertising()). Late-started services won't appear
+     * until a disruptive resetGATT() cycle. By starting at registration, all
+     * services are in GATT from boot; start()/stop() then control visibility
+     * via addService()/removeService().
      */
     template<template<typename> class LockPolicy>
     static void register_service(NimBLEServer* server) {
@@ -187,11 +191,11 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
         BLEX_LOG_TRACE("Registering service %s\n", blex_nimble::make_uuid<UUID>().toString().c_str());
         #endif
 
-        // Create NimBLE service
         pService = server->createService(blex_nimble::make_uuid<UUID>());
-
-        // Register all characteristics inline (blex<> will be complete when this is instantiated)
         register_all_chars<LockPolicy>(typename Base::chars_pack{});
+
+        // Must start before GATT commit at server start() or service will never appear online
+        pService->start();
 
         #if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
         BLEX_LOG_DEBUG("Registered service %s\n", blex_nimble::make_uuid<UUID>().toString().c_str());
@@ -199,8 +203,8 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
     }
 
     /**
-     * @brief Start the service (makes it visible in the GATT table)
-     * @return true if successful, false if service not registered
+     * @brief Make service visible to BLE clients
+     * @return true if successful
      */
     static bool start() {
         if (!pService) {
@@ -208,42 +212,35 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
             return false;
         }
 
-        // If service was removed (hidden), re-add it to make it visible
+        // Re-add if previously hidden via stop()
         if (pService->getRemoved() > 0) {
             if (NimBLEServer* server = getServer()) {
-                server->addService(pService);  // Clears removed flag + triggers serviceChanged
+                server->addService(pService);
             }
-        }
-
-        if (!pService->isStarted()) {
-            pService->start();
         }
         return true;
     }
 
     /**
-     * @brief Stop the service (remove from server but keep object for re-adding)
-     * @return true if successful, false if service not found
+     * @brief Hide service from BLE clients (keeps state for re-showing)
+     * @return true if successful
      */
     static bool stop() {
         NimBLEServer* server = getServer();
-        if (!server) {
+        if (!server || !pService) {
             BLEX_LOG_ERROR("Service or server not initialized\n");
             return false;
         }
-
-        // Remove service but keep object (deleteSvc=false) so it can be re-added later
         server->removeService(pService, false);
         return true;
     }
 
     /**
-     * @brief Check if service is currently started
-     * @return true if started, false otherwise
+     * @brief Check if service is visible to BLE clients
      */
     [[nodiscard]]
     static bool isStarted() {
-        return pService ? pService->isStarted() : false;
+        return pService && pService->getRemoved() == 0;
     }
 
     /**
