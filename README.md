@@ -284,7 +284,7 @@ MyChar::forEachSubscriber([](const SubscriptionInfo& info) {
 **Filter options:** `SubscriptionFilter::Any` (default), `Notify`, `Indicate`
 
 **`SubscriptionInfo` fields:**
-- `connInfo` - Full `NimBLEConnInfo` (address, handle, MTU, security state, etc.)
+- `connInfo` - Full connection info via `MyBlex::ConnectionInfo` (address, handle, MTU, security state, etc.)
 - `isNotifySubscribed` / `isIndicateSubscribed` - Subscription flags
 
 **Tip:** Return `false` from the callback to exit iteration early.
@@ -448,11 +448,13 @@ ServerCallbacks<>
 
 **Callback signatures:**
 ```cpp
-void onConnect(NimBLEConnInfo& conn);
-void onDisconnect(NimBLEConnInfo& conn, int reason);
-void onMTUChange(uint16_t mtu, NimBLEConnInfo& conn);
-void onConnParamsUpdate(NimBLEConnInfo& conn);
+void onConnect(MyBlex::ConnectionInfo& conn);
+void onDisconnect(MyBlex::ConnectionInfo& conn, int reason);
+void onMTUChange(uint16_t mtu, MyBlex::ConnectionInfo& conn);
+void onConnParamsUpdate(MyBlex::ConnectionInfo& conn);
 ```
+
+> **Note:** `MyBlex::ConnectionInfo` is a backend-agnostic type alias. For NimBLE backend, it resolves to `NimBLEConnInfo`.
 
 ### CharacteristicCallbacks
 
@@ -475,10 +477,10 @@ CharacteristicCallbacks<>
 
 **Callback signatures:**
 ```cpp
-void onRead(NimBLEConnInfo& conn);
-void onWrite(const ValueType& value, NimBLEConnInfo& conn);  // or raw: (const uint8_t* data, size_t len, NimBLEConnInfo& conn)
+void onRead(MyBlex::ConnectionInfo& conn);
+void onWrite(const ValueType& value, MyBlex::ConnectionInfo& conn);  // or raw: (const uint8_t* data, size_t len, MyBlex::ConnectionInfo& conn)
 void onStatus(NimBLECharacteristic* pChar, int code);
-void onSubscribe(uint16_t subValue, NimBLEConnInfo& conn);
+void onSubscribe(uint16_t subValue, MyBlex::ConnectionInfo& conn);
 ```
 
 ### setValue

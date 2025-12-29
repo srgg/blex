@@ -202,7 +202,7 @@ namespace ota
             /**
              * @brief Control characteristic write handler with ownership check
              */
-            static void onCtrlWrite(const uint8_t* data, const size_t len, NimBLEConnInfo& connInfo) {
+            static void onCtrlWrite(const uint8_t* data, const size_t len, typename Blex::ConnectionInfo& connInfo) {
                 // Reject commands from a non-owner (tryAcquire is atomic)
                 if (uint16_t handle = connInfo.getConnHandle(); !session_.tryAcquire(handle)) {
                     BLEX_LOG_WARN("[OTA] Command rejected from %u\n", handle);
@@ -218,7 +218,7 @@ namespace ota
             /**
              * @brief Control characteristic subscribe handler - manages ownership
              */
-            static void onCtrlSubscribe(const uint16_t subValue, NimBLEConnInfo& connInfo) {
+            static void onCtrlSubscribe(const uint16_t subValue, typename Blex::ConnectionInfo& connInfo) {
                 uint16_t handle = connInfo.getConnHandle();
 
                 if (subValue > 0) {
@@ -231,7 +231,7 @@ namespace ota
             /**
              * @brief Data characteristic write handler with ownership and speed management
              */
-            static void onWriteData(const uint8_t* data, const size_t len, NimBLEConnInfo& connInfo) {
+            static void onWriteData(const uint8_t* data, const size_t len, typename Blex::ConnectionInfo& connInfo) {
                 uint16_t handle = connInfo.getConnHandle();
 
                 // Atomically check/acquire ownership - rejects if owned by another

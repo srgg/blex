@@ -192,6 +192,8 @@ struct blex {
 
     // Expose the connection info type at blex level (backend-independent alias)
     using ConnectionInfo = NimBLEConnInfo;
+    static_assert(blex_core::ConnectionInfo<ConnectionInfo>,
+        "Backend ConnectionInfo type must satisfy blex_core::ConnectionInfo concept");
 
     // Re-export standard BLE types
     using BleAppearance = blex_standard::BleAppearance;

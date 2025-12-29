@@ -82,6 +82,29 @@ concept CharCallbacksConfigType = requires { typename T::is_blex_char_callbacks_
 template<typename T>
 concept IsPresentationFormatDescriptor = requires { typename T::is_presentation_format_descriptor; };
 
+/// @brief Concept for BLE connection info (backend-agnostic)
+/// @details Defines the interface that any backend's connection info type must satisfy.
+///          Used for server callbacks (onConnect, onDisconnect, etc.)
+template<typename T>
+concept ConnectionInfo = requires(T& t) {
+    // Identity
+    { t.getAddress() };
+    { t.getAddress().toString() } -> std::convertible_to<std::string>;
+    { t.getConnHandle() } -> std::convertible_to<uint16_t>;
+
+    // Connection parameters
+    { t.getConnInterval() } -> std::integral;  // 1.25ms units
+    { t.getConnLatency() } -> std::integral;
+    { t.getConnTimeout() } -> std::integral;   // 10ms units
+    { t.getMTU() } -> std::integral;
+
+    // Security state
+    { t.isBonded() } -> std::convertible_to<bool>;
+    { t.isEncrypted() } -> std::convertible_to<bool>;
+    { t.isAuthenticated() } -> std::convertible_to<bool>;
+    { t.getSecKeySize() } -> std::integral;
+};
+
 // ---------------------- Type Traits and Metaprogramming ----------------------
 
 // UUID type validation (compile-time evaluation)

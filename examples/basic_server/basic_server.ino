@@ -40,11 +40,11 @@ static void onTemperatureRead(float& value) {
 // Server callbacks
 // ============================================================================
 
-static void onConnect(const NimBLEConnInfo& conn) {
+static void onConnect(const blexDefault::ConnectionInfo& conn) {
     Serial.printf("Connected: %s\n", conn.getAddress().toString().c_str());
 }
 
-static void onDisconnect(const NimBLEConnInfo& conn, const int reason) {
+static void onDisconnect(const blexDefault::ConnectionInfo& conn, const int reason) {
     Serial.printf("Disconnected: %s (reason: %d)\n\n"
         "Waiting for connection..\n",
         conn.getAddress().toString().c_str(),
@@ -53,13 +53,13 @@ static void onDisconnect(const NimBLEConnInfo& conn, const int reason) {
     NimBLEDevice::startAdvertising();
 }
 
-static void onMTUChange(NimBLEConnInfo& conn) {
+static void onMTUChange(blexDefault::ConnectionInfo& conn) {
     Serial.printf("MTU updated: %u bytes for %s\n",
         conn.getMTU(),
         conn.getAddress().toString().c_str());
 }
 
-static void onConnParamsUpdate(NimBLEConnInfo& conn) {
+static void onConnParamsUpdate(blexDefault::ConnectionInfo& conn) {
     Serial.printf("Connection params updated for %s: interval=%.2fms, latency=%u, timeout=%ums\n",
         conn.getAddress().toString().c_str(),
         conn.getConnInterval() * 1.25f,
