@@ -35,11 +35,13 @@
     #define BLEX_NIMBLE_AVAILABLE
     #include <NimBLE2904.h>
     #include <NimBLE2905.h>
-    // For ble_svc_gap_device_appearance_set()
+    // For ble_svc_gap_device_appearance_set() and ble_gatts_svc_set_visibility()
     #if defined(CONFIG_NIMBLE_CPP_IDF)
         #include "host/ble_svc_gap.h"
+        #include "host/ble_gatt.h"
     #else
         #include "nimble/nimble/host/services/gap/include/services/gap/ble_svc_gap.h"
+        #include "nimble/nimble/host/include/host/ble_gatt.h"
     #endif
 #endif
 
@@ -218,6 +220,14 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
                 server->addService(pService);
             }
         }
+
+        // Restore visibility immediately (NimBLE's addService() doesn't do this)
+        int rc = ble_gatts_svc_set_visibility(pService->getHandle(), 1);
+        if (rc != 0) {
+            BLEX_LOG_ERROR("Failed to restore service visibility: %d\n", rc);
+            return false;
+        }
+
         return true;
     }
 
