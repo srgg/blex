@@ -430,6 +430,26 @@ struct PresentationFormatValue {
 };
 #pragma pack(pop)
 
+/// @brief Human-readable string for a well-known Bluetooth HCI error/disconnect code.
+/// @param code Raw HCI error code (Core Spec Vol 1 Part F), e.g. 0x13 = remote user terminated.
+/// @return Static string literal; "unknown" for unmapped codes.
+inline const char* hciReasonStr(uint8_t code) {
+    switch (code) {
+        case 0x05: return "authentication failure";
+        case 0x06: return "PIN/key missing";
+        case 0x08: return "supervision timeout";
+        case 0x13: return "remote user terminated";
+        case 0x14: return "remote terminated (low resources)";
+        case 0x15: return "remote terminated (power off)";
+        case 0x16: return "local host terminated";
+        case 0x22: return "LL response timeout";
+        case 0x3B: return "unacceptable connection params";
+        case 0x3D: return "MIC failure";
+        case 0x3E: return "connection failed to establish";
+        default:   return "unknown";
+    }
+}
+
 } // namespace blex_standard
 
 // Forward declarations

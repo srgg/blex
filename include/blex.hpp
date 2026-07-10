@@ -202,6 +202,13 @@ struct blex {
     using GattUnit = blex_standard::GattUnit;
     using PresentationFormatValue = blex_standard::PresentationFormatValue;
 
+    /// @brief Human-readable string for a BLE disconnect reason (delegates to blex_nimble).
+    /// @param reason The reason passed to the disconnect callback (NimBLE 0x200+HCI or raw HCI).
+    /// @return Static string literal; "unknown" for unmapped codes.
+    static const char* disconnectReasonStr(int reason) {
+        return blex_nimble::disconnectReasonStr(reason);
+    }
+
     // Re-export Permissions builder
     template<
         detail::SecPerm read = detail::SecPerm::Disabled,

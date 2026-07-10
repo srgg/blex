@@ -160,6 +160,14 @@ static void add_service_uuids_impl(NimBLEAdvertisementData& advData, std::tuple<
     (advData.addServiceUUID(make_uuid<blex_core::unwrap_service_impl<Services>::type::uuid>()), ...);
 }
 
+// Human-readable string for a BLE disconnect reason. NimBLE reports the HCI reason wrapped as
+// BLE_HS_HCI_ERR(code) = 0x200 + code (e.g. 520=0x208, 531=0x213); a raw HCI code is also
+// accepted. The name table itself is backend-agnostic (blex_standard::hciReasonStr).
+inline const char* disconnectReasonStr(int reason) {
+    const int hci = (reason >= 0x200) ? (reason - 0x200) : reason;
+    return blex_standard::hciReasonStr(static_cast<uint8_t>(hci));
+}
+
 #endif // BLEX_NIMBLE_AVAILABLE
 
 } // namespace blex_nimble
@@ -1113,7 +1121,7 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
             if constexpr (is_handler_provided<Config::DisconnectHandler>) {
                 Config::DisconnectHandler(nimble_conn, reason);
             } else {
-                BLEX_LOG_INFO("Disconnected (reason=%d)\n", reason);
+                BLEX_LOG_INFO("Disconnected (reason=%d, %s)\n", reason, blex_nimble::disconnectReasonStr(reason));
                 NimBLEDevice::startAdvertising();
                 BLEX_LOG_INFO("Advertising restarted\n");
             }
