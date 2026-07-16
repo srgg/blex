@@ -1256,7 +1256,9 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
 
         BLEX_LOG_TRACE("init: setting callbacks\n");
         static Callbacks callbacks;
-        server->setCallbacks(&callbacks);
+        // blex owns this static; NimBLE must borrow, not delete it in ~NimBLEServer() on deinit()
+        // (same borrowed-callbacks contract as characteristic callbacks in register_callbacks()).
+        server->setCallbacks(&callbacks, false);
 
         BLEX_LOG_TRACE("init: getting advertising\n");
         adv = NimBLEDevice::getAdvertising();
