@@ -536,6 +536,20 @@ struct blex {
             return ensure_configured();
         }
 
+        // Bring the server down: tear down the backend (host + controller freed) and clear the
+        // configured flag so init() rebuilds the full service graph on the next call. Idempotent.
+        // One server per firmware => configured_ is the single lifecycle source of truth.
+        // configured_ is flipped FIRST so BLE callbacks (e.g. on_disconnect re-advertising) that
+        // fire during teardown observe "down" and skip touching the tearing-down stack.
+        static void deinit() {
+            if (!configured_) return;
+            configured_ = false;
+            Backend::deinit();
+        }
+
+        [[nodiscard]]
+        static bool isInitialized() { return configured_; }
+
         // ---------------------- Advertising Control ----------------------
 
         static void startAdvertising() {

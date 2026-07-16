@@ -1097,6 +1097,8 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
     // NimBLE-specific runtime state
     inline static NimBLEServer* server = nullptr;
     inline static NimBLEAdvertising* adv = nullptr;
+    // Atomic once-only init guard, resettable by deinit() (was a function-local static in init()).
+    inline static std::atomic_flag initialized_ = ATOMIC_FLAG_INIT;
 
     // Runtime tuning state (static storage, no heap)
     inline static int8_t runtime_tx_power_ = TX_POWER_UNSET;
@@ -1182,8 +1184,7 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
     static bool init() {
         BLEX_LOG_DEBUG("init: initializing NimBLE-Arduino backend...\n");
 
-        static std::atomic_flag init_called = ATOMIC_FLAG_INIT;
-        if (init_called.test_and_set(std::memory_order_acq_rel)) {
+        if (initialized_.test_and_set(std::memory_order_acq_rel)) {
             BLEX_LOG_WARN("NimBLE-Arduino backend already initialized, nothing to do\n");
             return server != nullptr;
         }
@@ -1262,6 +1263,24 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
 
         BLEX_LOG_INFO("init: NimBLE-Arduino backend successfully initialized\n");
         return true;
+    }
+
+    // Tear the backend fully down: free the NimBLE host + BT controller and every GATT object,
+    // clear all cached handles + re-arm the init guard so a later init() rebuilds from scratch.
+    // Idempotent — a no-op if never initialized. Inverse of init().
+    static void deinit() {
+        if (!initialized_.test(std::memory_order_acquire)) return;
+        BLEX_LOG_DEBUG("deinit: tearing down NimBLE-Arduino backend...\n");
+        if (!NimBLEDevice::deinit(true)) {   // free host + controller + all services/characteristics
+            BLEX_LOG_ERROR("deinit: NimBLEDevice::deinit reported failure\n");
+        }
+        server = nullptr;
+        adv    = nullptr;
+        runtime_adv_interval_min_ = 0;
+        runtime_adv_interval_max_ = 0;
+        blex_nimble::g_default_conn_params.initialized = false;
+        initialized_.clear(std::memory_order_release);   // re-arm init() (atomic once-only preserved)
+        BLEX_LOG_INFO("deinit: NimBLE-Arduino backend torn down\n");
     }
 
     // ---------------------- Advertising Control ----------------------
