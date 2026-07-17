@@ -20,40 +20,26 @@
       "email": "srggal42@gmail.com"
     }
   ],
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "dependencies": {
+    "h2zero/NimBLE-Arduino": "https://github.com/srgg/NimBLE-Arduino.git#feat/aggregate-format-2905"
+  },
+  "build": {
+    "flags": [
+      "-std=gnu++2a",
+      "-fconcepts"
+    ],
+    "unflags": [
+      "-std=c++17"
+    ]
+  },
   "export": {
-    "frameworks": [
-      "arduino",
-      "espidf"
-    ],
-    "platforms": [
-      "espressif32@^6.0.0"
-    ],
-    "dependencies": {
-      "h2zero/NimBLE-Arduino": "^2.5.0"
-    },
-    "build": {
-      "flags": [
-        "-std=gnu++2a",
-        "-fconcepts"
-      ],
-      "unflags": [
-        "-std=c++17"
-      ],
-      "extraScript": [
-        "pre:scripts/version.py",
-        "pre:scripts/cpp-build-flags.py"
-      ]
-    },
-    "extraScript": [
-      "scripts/cpp-build-flags.py",
-      "scripts/version.py",
-      "scripts/dfu-ble-uploader.py"
-    ],
-    "export": {
-      "exclude": [
-        ".github",
-        ".gitignore"
-      ]
-    }
+    "exclude": [
+      ".github",
+      ".gitignore"
+    ]
   }
 }
