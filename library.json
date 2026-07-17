@@ -29,7 +29,7 @@
       "espressif32@^6.0.0"
     ],
     "dependencies": {
-      "h2zero/NimBLE-Arduino": "^2.3.6"
+      "h2zero/NimBLE-Arduino": "^2.5.0"
     },
     "build": {
       "flags": [
