@@ -229,10 +229,16 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
             }
         }
 
-        // Restore visibility immediately (NimBLE's addService() doesn't do this)
+        // Restore visibility immediately (NimBLE's addService() doesn't do this).
+        // This fails benignly when the service lost its handle to a GATT reset while hidden —
+        // resetGATT() clears every handle and skips re-registering the hidden ones. addService()
+        // above already cleared the removed flag and flagged the table as changed, so the next
+        // NimBLEServer::start() re-registers the service and the handle comes back. That reset
+        // only runs while no client is connected; with one attached the handle was never cleared
+        // and this path succeeds outright.
         int rc = ble_gatts_svc_set_visibility(pService->getHandle(), 1);
         if (rc != 0) {
-            BLEX_LOG_ERROR("Failed to restore service visibility: %d\n", rc);
+            BLEX_LOG_WARN("Service visibility not restored yet (rc=%d) — deferred to the next GATT reset\n", rc);
             return false;
         }
 
@@ -250,6 +256,18 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
             return false;
         }
         server->removeService(pService, false);
+
+        // removeService() returns void and gives up SILENTLY when the service has no live GATT
+        // handle: it hides by calling ble_gatts_svc_set_visibility() first and returns early if
+        // that fails, leaving the removed flag unset. That is the state before the GATT table is
+        // committed — registration alone does not assign handles; ble_gatts_start() does, and it
+        // runs on the first startAdvertising(). Reporting success there made a caller that gates
+        // services by state believe a service was hidden while it stayed fully visible. Report
+        // what actually happened so the caller can retry once the table is live.
+        if (isStarted()) {
+            BLEX_LOG_ERROR("Failed to hide service — no live GATT handle (table not committed yet?)\n");
+            return false;
+        }
         return true;
     }
 
