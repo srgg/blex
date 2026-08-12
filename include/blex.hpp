@@ -550,6 +550,15 @@ struct blex {
         [[nodiscard]]
         static bool isInitialized() { return configured_; }
 
+        // Commit the GATT table so services get handles without advertising. Opt-in: init() leaves
+        // the table uncommitted, and the first startAdvertising() commits it. Call this when you
+        // gate services by state and the first gating happens BEFORE you advertise — otherwise
+        // those calls hit a service with no handle and do nothing. Idempotent.
+        static bool commitServices() {
+            if (!ensure_configured()) return false;
+            return Backend::commitServices();
+        }
+
         // ---------------------- Advertising Control ----------------------
 
         static void startAdvertising() {

@@ -1303,6 +1303,26 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
         BLEX_LOG_INFO("deinit: NimBLE-Arduino backend torn down\n");
     }
 
+    // Commit GATT table. Registration assigns no handle — ble_gatts_start() does, and hide/show
+    // both go through it. Uncommitted table waits for first startAdvertising(), so gating before
+    // that does nothing, silently. NimBLEServer::start() is the commit despite its name: it builds
+    // the definitions, wires the register callback that fills in handles, then starts GATT.
+    // Idempotent, starts no advertising. Call once after init(), BEFORE gating — a later call with
+    // no client attached re-registers the table and leaves hidden services handle-less until the
+    // next reset.
+    static bool commitServices() {
+        if (!server) {
+            BLEX_LOG_ERROR("commitServices: no server\n");
+            return false;
+        }
+        if (!server->start()) {
+            BLEX_LOG_ERROR("commitServices: GATT table failed to start\n");
+            return false;
+        }
+        BLEX_LOG_DEBUG("commitServices: GATT table committed\n");
+        return true;
+    }
+
     // ---------------------- Advertising Control ----------------------
 
     static void startAdvertising() {
