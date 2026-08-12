@@ -544,6 +544,9 @@ struct blex {
         static void deinit() {
             if (!configured_) return;
             configured_ = false;
+            // Before the objects behind them are freed, so a publisher racing the teardown finds
+            // nullptr rather than a dangling pointer.
+            forget_all_services(typename Server::ServicesTuple{});
             Backend::deinit();
         }
 
@@ -782,6 +785,11 @@ struct blex {
         template<typename... Services>
         static void register_all_services(ServicesPack<Services...>) {
             (register_service<Services>(), ...);
+        }
+
+        template<typename... Services>
+        static void forget_all_services(ServicesPack<Services...>) {
+            ((blex_core::unwrap_service_impl<Services>::type::Backend::forget()), ...);
         }
 
         template<typename... Services>

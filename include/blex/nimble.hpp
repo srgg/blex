@@ -186,6 +186,13 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
     // NimBLE-specific storage - runtime service handle
     inline static NimBLEService* pService = nullptr;
 
+    // Drop this service's cached pointer and every characteristic's — same restriction as
+    // CharacteristicBackend::forget().
+    static void forget() {
+        forget_all_chars(typename Base::chars_pack{});
+        pService = nullptr;
+    }
+
     /**
      * @brief Register service with NimBLE and add to GATT table
      *
@@ -349,6 +356,14 @@ public:
 
 private:
     /**
+     * @brief Helper to drop every characteristic's cached pointer (inverse of register_all_chars)
+     */
+    template<typename... CharTypes>
+    static void forget_all_chars(blex_core::CharsPack<CharTypes...>) {
+        (CharTypes::Backend::forget(), ...);
+    }
+
+    /**
      * @brief Helper to register all characteristics (directly to backends)
      */
     template<template<typename> class LockPolicy, typename... CharTypes>
@@ -389,6 +404,11 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
 
     // NimBLE-specific storage - runtime characteristic handle
     inline static NimBLECharacteristic* pChar = nullptr;
+
+    // Drop the cached pointer. Valid only where the NimBLE objects are being destroyed:
+    // setValue() guards with a null check alone, so a freed pointer reaches the write. A
+    // hide/show keeps the objects and must leave the cache intact.
+    static void forget() { pChar = nullptr; }
 
     // ---------------------- Nested Shim (NimBLE Callback Adapter) ----------------------
 
