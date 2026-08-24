@@ -196,11 +196,10 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
     /**
      * @brief Register service with NimBLE and add to GATT table
      *
-     * Services must be started before ble_gatts_start() commits the GATT table
-     * (triggered by first startAdvertising()). Late-started services won't appear
-     * until a disruptive resetGATT() cycle. By starting at registration, all
-     * services are in GATT from boot; start()/stop() then control visibility
-     * via addService()/removeService().
+     * Services must exist before ble_gatts_start() commits the GATT table (triggered by
+     * first startAdvertising()). A service created later won't appear until a disruptive
+     * resetGATT() cycle. Registering here puts every service in GATT from boot;
+     * start()/stop() then control visibility via addService()/removeService().
      */
     template<template<typename> class LockPolicy>
     static void register_service(NimBLEServer* server) {
@@ -211,8 +210,8 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
         pService = server->createService(blex_nimble::make_uuid<UUID>());
         register_all_chars<LockPolicy>(typename Base::chars_pack{});
 
-        // Must start before GATT commit at server start() or service will never appear online
-        pService->start();
+        // No NimBLEService::start() here: it is `bool start() { return true; }` and deprecated.
+        // NimBLEServer::start() runs start_internal() for every registered service.
 
         #if BLEX_LOG_LEVEL >= BLEX_LOG_LEVEL_DEBUG
         BLEX_LOG_DEBUG("Registered service %s\n", blex_nimble::make_uuid<UUID>().toString().c_str());
