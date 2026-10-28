@@ -25,7 +25,7 @@
     "espidf"
   ],
   "dependencies": {
-    "h2zero/NimBLE-Arduino": "https://github.com/srgg/NimBLE-Arduino.git#feat/aggregate-format-2905"
+    "h2zero/NimBLE-Arduino": "https://github.com/srgg/NimBLE-Arduino.git#avionix"
   },
   "build": {
     "flags": [
