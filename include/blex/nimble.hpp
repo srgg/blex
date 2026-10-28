@@ -34,7 +34,6 @@
 #ifdef NIMBLE_CPP_DEVICE_H_
     #define BLEX_NIMBLE_AVAILABLE
     #include <NimBLE2904.h>
-    #include <NimBLE2905.h>
     // For ble_svc_gap_device_appearance_set() and ble_gatts_svc_set_visibility()
     #if defined(CONFIG_NIMBLE_CPP_IDF)
         #include "host/ble_svc_gap.h"
@@ -550,11 +549,11 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             }
         }
 
-        void onRead(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
+        NimBLEGattStatus onRead(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
             if constexpr (Base::ReadHandler != nullptr) {
                 if constexpr (use_read_notify_optimization) {
                     if (read_notify_optimization.notified_value_valid.load(std::memory_order_acquire)) {
-                        return;
+                        return NimBLEGattStatus::Success;
                     }
                 }
 
@@ -563,9 +562,11 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                 Base::ReadHandler(tmp);
                 setValue_unsafe(tmp);
             }
+            return NimBLEGattStatus::Success;
         }
 
-        void onWrite(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
+        // NimBLE stores `value` only after Success; pChar still holds the previous write.
+        NimBLEGattStatus onWrite(NimBLECharacteristic* pChar, NimBLEAttValue& value, NimBLEConnInfo& connInfo) override {
             if constexpr (Base::WriteHandler != nullptr) {
                 // Detect if WriteHandler accepts ConnectionInfo parameter
                 constexpr bool wants_conn_info_value =
@@ -578,30 +579,26 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                 if constexpr (std::is_same_v<typename Base::value_type, std::string> ||
                               std::is_same_v<typename Base::value_type, std::vector<uint8_t>>) {
                     if constexpr (wants_conn_info_value) {
-                        Base::WriteHandler(pChar->getValue(), connInfo);
+                        Base::WriteHandler(value, connInfo);
                     } else {
-                        Base::WriteHandler(pChar->getValue());
+                        Base::WriteHandler(value);
                     }
                 } else if constexpr (std::is_array_v<typename Base::value_type> &&
                                      std::is_same_v<std::remove_extent_t<typename Base::value_type>, uint8_t>) {
                     // uint8_t[N] buffer type: pass raw (ptr, size) with optional connInfo
-                    const auto& data = pChar->getValue();
-                    static_assert(std::is_same_v<std::decay_t<decltype(data)>, NimBLEAttValue>,
-                        "Expected NimBLEAttValue from getValue()");
                     if constexpr (wants_conn_info_buffer) {
-                        Base::WriteHandler(data.data(), data.size(), connInfo);
+                        Base::WriteHandler(value.data(), value.size(), connInfo);
                     } else {
-                        Base::WriteHandler(data.data(), data.size());
+                        Base::WriteHandler(value.data(), value.size());
                     }
                 } else {
-                    const auto& data = pChar->getValue();
-                    if (data.size() < sizeof(typename Base::value_type)) {
+                    if (value.size() < sizeof(typename Base::value_type)) {
                         BLEX_LOG_ERROR("BLE write ignored due to size mismatch: got %u, expected %u\n",
-                                      (unsigned)data.size(), (unsigned)sizeof(typename Base::value_type));
-                        return;  // Silently ignore malformed writes
+                                      (unsigned)value.size(), (unsigned)sizeof(typename Base::value_type));
+                        return NimBLEGattStatus::Success;  // Silently ignore malformed writes
                     }
                     typename Base::value_type val;
-                    std::memcpy(&val, data.data(), sizeof(typename Base::value_type));
+                    std::memcpy(&val, value.data(), sizeof(typename Base::value_type));
                     if constexpr (wants_conn_info_value) {
                         Base::WriteHandler(val, connInfo);
                     } else {
@@ -609,6 +606,7 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                     }
                 }
             }
+            return NimBLEGattStatus::Success;
         }
 
         // Override onStatus: NimBLE base requires NimBLEConnInfo& param (unused in handler)
@@ -620,15 +618,6 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             }
         }
 
-    private:
-        // Override deprecated 2-param onStatus as private to prevent hiding warning.
-        // NimBLE deprecated this signature in favor of 3-param version with NimBLEConnInfo&.
-        void onStatus([[maybe_unused]] NimBLECharacteristic* pChar,
-                      [[maybe_unused]] int code) override {
-            // Deprecated - do nothing. Use 3-param version above.
-        }
-
-    public:
         void onSubscribe(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo, uint16_t subValue) override {
             if constexpr (use_read_notify_optimization) {
                 if (subValue == 0) {
@@ -698,7 +687,7 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                       Base::StatusHandler != nullptr ||
                       Base::SubscribeHandler != nullptr) {
             static Shim<LockPolicy> shim;
-            pC->setCallbacks(&shim);
+            pC->setCallbacks(shim);
         }
     }
 
@@ -1096,19 +1085,14 @@ template<typename... PresentationFormatDescriptors>
 struct DescriptorBackend<AggregateFormatDescriptorBase<PresentationFormatDescriptors...>> {
     using Base = AggregateFormatDescriptorBase<PresentationFormatDescriptors...>;
 
-    template<typename PresentationDesc>
-    static void add_presentation_descriptor(NimBLECharacteristic* pChar, NimBLE2905* p2905) {
-        // Use the backend for the presentation descriptor
-        auto* desc = DescriptorBackend<PresentationDesc>::register_to_char(pChar);
-        if (desc) {
-            p2905->add2904Descriptor(static_cast<NimBLE2904*>(desc));
-        }
-    }
-
+    // NimBLEServer::start() fills an empty 0x2905 with the handles of the characteristic's
+    // 0x2904 descriptors, in creation order.
     static NimBLEDescriptor* register_to_char(NimBLECharacteristic* pChar) {
-        NimBLE2905* p2905 = pChar->create2905();
-        (add_presentation_descriptor<PresentationFormatDescriptors>(pChar, p2905), ...);
-        return p2905;
+        NimBLEDescriptor* aggregate = pChar->createDescriptor(
+            blex_nimble::make_uuid<Base::uuid>(), NIMBLE_PROPERTY::READ,
+            sizeof(uint16_t) * sizeof...(PresentationFormatDescriptors));
+        (DescriptorBackend<PresentationFormatDescriptors>::register_to_char(pChar), ...);
+        return aggregate;
     }
 };
 
@@ -1293,9 +1277,7 @@ struct ServerBackend<ServerBase<ShortName, Derived, Args...>> {
 
         BLEX_LOG_TRACE("init: setting callbacks\n");
         static Callbacks callbacks;
-        // blex owns this static; NimBLE must borrow, not delete it in ~NimBLEServer() on deinit()
-        // (same borrowed-callbacks contract as characteristic callbacks in register_callbacks()).
-        server->setCallbacks(&callbacks, false);
+        server->setCallbacks(callbacks);
 
         BLEX_LOG_TRACE("init: getting advertising\n");
         adv = NimBLEDevice::getAdvertising();
