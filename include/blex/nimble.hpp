@@ -549,7 +549,7 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             }
         }
 
-        NimBLEGattStatus onRead(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
+        uint8_t onRead(NimBLECharacteristic* pChar, NimBLEConnInfo& connInfo) override {
             if constexpr (Base::ReadHandler != nullptr) {
                 if constexpr (use_read_notify_optimization) {
                     if (read_notify_optimization.notified_value_valid.load(std::memory_order_acquire)) {
@@ -566,7 +566,7 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
         }
 
         // NimBLE stores `value` only after Success; pChar still holds the previous write.
-        NimBLEGattStatus onWrite(NimBLECharacteristic* pChar, NimBLEAttValue& value, NimBLEConnInfo& connInfo) override {
+        uint8_t onWrite(NimBLECharacteristic* pChar, NimBLEAttValue& value, NimBLEConnInfo& connInfo) override {
             if constexpr (Base::WriteHandler != nullptr) {
                 // Detect if WriteHandler accepts ConnectionInfo parameter
                 constexpr bool wants_conn_info_value =
