@@ -34,13 +34,11 @@
 #ifdef NIMBLE_CPP_DEVICE_H_
     #define BLEX_NIMBLE_AVAILABLE
     #include <NimBLE2904.h>
-    // For ble_svc_gap_device_appearance_set() and ble_gatts_svc_set_visibility()
+    // For ble_svc_gap_device_appearance_set()
     #if defined(CONFIG_NIMBLE_CPP_IDF)
         #include "host/ble_svc_gap.h"
-        #include "host/ble_gatt.h"
     #else
         #include "nimble/nimble/host/services/gap/include/services/gap/ble_svc_gap.h"
-        #include "nimble/nimble/host/include/host/ble_gatt.h"
     #endif
 #endif
 
@@ -219,34 +217,24 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
 
     /**
      * @brief Make service visible to BLE clients
-     * @return true if successful
+     * @return true once handed to NimBLEServer::addService(), which shows a hidden service in
+     *         place, or at the next GATT reset when one is pending
      */
     static bool start() {
         if (!pService) {
             BLEX_LOG_ERROR("Service not registered (pService is null)\n");
             return false;
         }
-
-        // Re-add if previously hidden via stop()
-        if (pService->getRemoved() > 0) {
-            if (NimBLEServer* server = getServer()) {
-                server->addService(pService);
-            }
+        if (pService->getRemoved() == 0) {
+            return true;
         }
 
-        // Restore visibility immediately (NimBLE's addService() doesn't do this).
-        // This fails benignly when the service lost its handle to a GATT reset while hidden —
-        // resetGATT() clears every handle and skips re-registering the hidden ones. addService()
-        // above already cleared the removed flag and flagged the table as changed, so the next
-        // NimBLEServer::start() re-registers the service and the handle comes back. That reset
-        // only runs while no client is connected; with one attached the handle was never cleared
-        // and this path succeeds outright.
-        int rc = ble_gatts_svc_set_visibility(pService->getHandle(), 1);
-        if (rc != 0) {
-            BLEX_LOG_WARN("Service visibility not restored yet (rc=%d) — deferred to the next GATT reset\n", rc);
+        NimBLEServer* server = getServer();
+        if (!server) {
+            BLEX_LOG_ERROR("Server not initialized\n");
             return false;
         }
-
+        server->addService(pService);
         return true;
     }
 
@@ -263,8 +251,8 @@ struct ServiceBackend<ServiceBase<UUID, Derived, Chars...>> {
         server->removeService(pService, false);
 
         // removeService() returns void and gives up SILENTLY when the service has no live GATT
-        // handle: it hides by calling ble_gatts_svc_set_visibility() first and returns early if
-        // that fails, leaving the removed flag unset. That is the state before the GATT table is
+        // handle: it hides the service first and returns early if that fails, leaving the removed
+        // flag unset. That is the state before the GATT table is
         // committed — registration alone does not assign handles; ble_gatts_start() does, and it
         // runs on the first startAdvertising(). Reporting success there made a caller that gates
         // services by state believe a service was hidden while it stayed fully visible. Report
