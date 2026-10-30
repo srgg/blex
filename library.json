@@ -25,7 +25,7 @@
     "espidf"
   ],
   "dependencies": {
-    "h2zero/NimBLE-Arduino": "https://github.com/srgg/NimBLE-Arduino.git#avionix-next"
+    "h2zero/NimBLE-Arduino": "https://github.com/srgg/NimBLE-Arduino.git#b80bfe9a3de6f37734d7318804f5631dcd7ebf08"
   },
   "build": {
     "flags": [
