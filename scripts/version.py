@@ -46,7 +46,7 @@ def load_device_config():
         raise RuntimeError(f"Invalid JSON in {config_path}: {e}")
 
     # Validate required keys
-    required_keys = ["manufacturer", "manufacturer_id", "hardware_version", "devices"]
+    required_keys = ["manufacturer", "manufacturer_id", "hardware_version"]
     missing_keys = [key for key in required_keys if key not in config]
     if missing_keys:
         raise RuntimeError(
@@ -261,86 +261,95 @@ git_revision = get_git_revision()
 # Get board name from PlatformIO environment (used for MODEL_NUMBER only)
 board_name = env.get("BOARD", "unknown")
 
-# Store cache in PlatformIO's build directory (per-environment)
-cache_file = Path(env.subst("$BUILD_DIR")) / "device_macs.json"
-cache_file.parent.mkdir(parents=True, exist_ok=True)  # Ensure the build directory exists
+# A project whose firmware reads the board's identity at boot sets
+# `custom_blex_device_identity = runtime`: no port is probed and no board is compiled in, so
+# one image serves every board. Unset, the board on the first port is read and compiled in.
+runtime_identity = env.GetProjectOption("custom_blex_device_identity", "build") == "runtime"
+device_name = device_long_name = ble_device_addr = None
 
-# Try to load from the cache file first
-mac_addresses = None
-if cache_file.exists():
-    try:
-        with open(cache_file, 'r') as f:
-            cached = json.load(f)
-            # Use cache regardless of board - it's whatever device is/was connected
-            mac_addresses = cached
-            print(f"Using cached MAC addresses: BLE={cached['ble']}, WiFi={cached['wifi']}")
-    except Exception as e:
-        print(f"Failed to load cache: {e}")
+if runtime_identity:
+    print("Device identity: read at runtime (custom_blex_device_identity = runtime), no port probed")
+else:
+    # Store cache in PlatformIO's build directory (per-environment)
+    cache_file = Path(env.subst("$BUILD_DIR")) / "device_macs.json"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)  # Ensure the build directory exists
 
-# If no cache, try to detect from the connected device
-if not mac_addresses:
-    try:
-        mac_data = get_esp32_mac_addresses(env)
-        mac_addresses = {
-            'ble': mac_data['ble'],
-            'wifi': mac_data['wifi']
-        }
-        # Save to cache - overwrites previous device's MACs
+    # Try to load from the cache file first
+    mac_addresses = None
+    if cache_file.exists():
         try:
-            with open(cache_file, 'w') as f:
-                json.dump(mac_addresses, f, indent=2)
-            print(f"Detected and saved MAC addresses: BLE={mac_addresses['ble']}, WiFi={mac_addresses['wifi']}")
+            with open(cache_file, 'r') as f:
+                cached = json.load(f)
+                # Use cache regardless of board - it's whatever device is/was connected
+                mac_addresses = cached
+                print(f"Using cached MAC addresses: BLE={cached['ble']}, WiFi={cached['wifi']}")
         except Exception as e:
-            print(f"Warning: Failed to save cache: {e}")
-    except RuntimeError as e:
-        print(f"Warning: {e}, using fallback values")
-        mac_addresses = None
+            print(f"Failed to load cache: {e}")
 
-# Extract MAC values and serial number
-if mac_addresses:
-    ble_mac = mac_addresses['ble']
-    wifi_mac = mac_addresses['wifi']
-    serial_number = ble_mac.replace(":", "")  # Serial = BLE MAC without colons
-else:
-    ble_mac = "00:00:00:00:00:00"
-    wifi_mac = "00:00:00:00:00:00"
-    serial_number = "000000000000"
-
-# Look up device-specific configuration by serial number
-device_config = None
-if DEVICE_CONFIG:
-    device_config = DEVICE_CONFIG["devices"].get(serial_number, None)
-
-# Warn if device is not configured
-if not device_config:
-    print(f"Warning: No device config for serial '{serial_number}', using defaults")
-    device_config = {
-        "serial_number": serial_number,
-        "ble_address": ble_mac,
-        "wifi_address": wifi_mac,
-        "name": f"BX-{serial_number[-4:]}"  # Use the last 4 chars of serial
-        # no long_name - will only use short name
-    }
-else:
-    print(f"Found device config for serial '{serial_number}': {device_config.get('name', 'Unknown')}")
-
-    # If device config has ble_device, add it to cache
-    if 'ble_device' in device_config and device_config['ble_device']:
-        ble_device_addr = device_config['ble_device']
-        # Update cache with ble_device if not already present
-        if 'ble_device' not in mac_addresses:
-            mac_addresses['ble_device'] = ble_device_addr
+    # If no cache, try to detect from the connected device
+    if not mac_addresses:
+        try:
+            mac_data = get_esp32_mac_addresses(env)
+            mac_addresses = {
+                'ble': mac_data['ble'],
+                'wifi': mac_data['wifi']
+            }
+            # Save to cache - overwrites previous device's MACs
             try:
                 with open(cache_file, 'w') as f:
                     json.dump(mac_addresses, f, indent=2)
-                print(f"Added BLE device address to cache: {ble_device_addr}")
+                print(f"Detected and saved MAC addresses: BLE={mac_addresses['ble']}, WiFi={mac_addresses['wifi']}")
             except Exception as e:
-                print(f"Warning: Failed to update cache: {e}")
+                print(f"Warning: Failed to save cache: {e}")
+        except RuntimeError as e:
+            print(f"Warning: {e}, using fallback values")
+            mac_addresses = None
 
-# Extract device names
-device_name = device_config['name']
-device_long_name = device_config.get('long_name', None)  # Optional
-ble_device_addr = device_config.get('ble_device', None)  # Optional - BLE random private address
+    # Extract MAC values and serial number
+    if mac_addresses:
+        ble_mac = mac_addresses['ble']
+        wifi_mac = mac_addresses['wifi']
+        serial_number = ble_mac.replace(":", "")  # Serial = BLE MAC without colons
+    else:
+        ble_mac = "00:00:00:00:00:00"
+        wifi_mac = "00:00:00:00:00:00"
+        serial_number = "000000000000"
+
+    # Look up device-specific configuration by serial number
+    device_config = None
+    if DEVICE_CONFIG:
+        device_config = DEVICE_CONFIG.get("devices", {}).get(serial_number, None)
+
+    # Warn if device is not configured
+    if not device_config:
+        print(f"Warning: No device config for serial '{serial_number}', using defaults")
+        device_config = {
+            "serial_number": serial_number,
+            "ble_address": ble_mac,
+            "wifi_address": wifi_mac,
+            "name": f"BX-{serial_number[-4:]}"  # Use the last 4 chars of serial
+            # no long_name - will only use short name
+        }
+    else:
+        print(f"Found device config for serial '{serial_number}': {device_config.get('name', 'Unknown')}")
+
+        # If device config has ble_device, add it to cache
+        if 'ble_device' in device_config and device_config['ble_device']:
+            ble_device_addr = device_config['ble_device']
+            # Update cache with ble_device if not already present
+            if 'ble_device' not in mac_addresses:
+                mac_addresses['ble_device'] = ble_device_addr
+                try:
+                    with open(cache_file, 'w') as f:
+                        json.dump(mac_addresses, f, indent=2)
+                    print(f"Added BLE device address to cache: {ble_device_addr}")
+                except Exception as e:
+                    print(f"Warning: Failed to update cache: {e}")
+
+    # Extract device names
+    device_name = device_config['name']
+    device_long_name = device_config.get('long_name', None)  # Optional
+    ble_device_addr = device_config.get('ble_device', None)  # Optional - BLE random private address
 
 # Build the C++ defines list
 # Use DEVICE_CONFIG values if available, otherwise use None
@@ -358,13 +367,16 @@ cpp_defines = [
     ("MANUFACTURER_NAME", f'\\"{manufacturer_name}\\"' if manufacturer_name else None),
     ("MANUFACTURER_ID", f'{manufacturer_id}' if manufacturer_id is not None else None),
     ("HARDWARE_VERSION", f'\\"{hardware_version}\\"' if hardware_version else None),
-    ("SERIAL_NUMBER", f'\\"{serial_number}\\"'),
-    ("DEVICE_BLE_MAC", f'\\"{ble_mac}\\"'),
-    ("DEVICE_WIFI_MAC", f'\\"{wifi_mac}\\"'),
-
-    # BLE device name (always required)
-    ("DEVICE_NAME", f'\\"{device_name}\\"'),
 ]
+
+# The board this build probed, unless the firmware reads its own at boot
+if not runtime_identity:
+    cpp_defines += [
+        ("SERIAL_NUMBER", f'\\"{serial_number}\\"'),
+        ("DEVICE_BLE_MAC", f'\\"{ble_mac}\\"'),
+        ("DEVICE_WIFI_MAC", f'\\"{wifi_mac}\\"'),
+        ("DEVICE_NAME", f'\\"{device_name}\\"'),
+    ]
 
 # Filter out None values
 cpp_defines = [(k, v) for k, v in cpp_defines if v is not None]
@@ -389,7 +401,9 @@ if ble_device_addr:
 print("="*60)
 if DEVICE_CONFIG is None:
     print("Device Configuration: [WARNING: device_config.json NOT FOUND - using defaults]")
-elif not DEVICE_CONFIG["devices"].get(serial_number):
+elif runtime_identity:
+    print("Device Configuration: [the board's identity is read at runtime]")
+elif not DEVICE_CONFIG.get("devices", {}).get(serial_number):
     print(f"Device Configuration: [WARNING: Device '{serial_number}' NOT in config - using defaults]")
 else:
     print("Device Configuration:")
@@ -398,16 +412,18 @@ if manufacturer_name:
     print(f"  Manufacturer:      {manufacturer_name}")
 if manufacturer_id is not None:
     print(f"  Manufacturer ID:   0x{manufacturer_id:x}")
-print(f"  BLE MAC:           {ble_mac}")
-if ble_device_addr:
-    print(f"  BLE Device Addr:   {ble_device_addr}")
-print(f"  WiFi MAC:          {wifi_mac}")
-print(f"  Serial Number:     {serial_number}")
+if not runtime_identity:
+    print(f"  BLE MAC:           {ble_mac}")
+    if ble_device_addr:
+        print(f"  BLE Device Addr:   {ble_device_addr}")
+    print(f"  WiFi MAC:          {wifi_mac}")
+    print(f"  Serial Number:     {serial_number}")
 if hardware_version:
     print(f"  Hardware Version:  {hardware_version}")
 print(f"  Firmware Version:  {firmware_version}")
 print(f"  Software Revision: {git_revision}")
-print(f"  Device Name:       {device_name}")
+if not runtime_identity:
+    print(f"  Device Name:       {device_name}")
 if device_long_name:
     print(f"  Long Name:         {device_long_name}")
 print("="*60)

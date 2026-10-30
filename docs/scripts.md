@@ -88,6 +88,21 @@ If `device_config.json` is missing or the device not found:
   - Device name: `BX-<last4>` (using last 4 chars of MAC)
   - Serial number: MAC address without colons
 
+### Identity read at runtime
+
+A project whose firmware reads the board's identity at boot sets, in `platformio.ini`:
+
+```ini
+custom_blex_device_identity = runtime
+```
+
+The build then runs no `esptool` command, writes no `device_macs.json`, and defines none of
+`SERIAL_NUMBER`, `DEVICE_BLE_MAC`, `DEVICE_WIFI_MAC`, `DEVICE_NAME`, `DEVICE_NAME_LONG` or
+`DEVICE_BLE_ADDR`; `BLE_DEVICE_ADDRESS` is not set for the DFU uploader. One image then serves
+every board. `devices` in `device_config.json` is optional in either mode. The firmware supplies
+the Serial Number characteristic itself: `DeviceInfoService` falls back to `"unknown"` without
+`SERIAL_NUMBER`.
+
 ### Build Output Example
 
 ```
