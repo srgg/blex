@@ -203,8 +203,8 @@ def get_esp32_mac_addresses(env):
 def get_firmware_version():
     """
     Get the semantic version from the Git tag.
-    Expected tag format: v1.2.3 or 1.2.3
-    Returns: "1.2.3" or "0.0.0-dev" if no tags
+    Expected tag format: v1.2.3 or 1.2.3, or a release candidate v1.2.3-rc.4
+    Returns: "1.2.3", "1.2.3-rc.4", or "0.0.0-dev" if no tags
     """
     try:
         # Get the latest tag
@@ -217,8 +217,8 @@ def get_firmware_version():
         # Strip 'v' prefix if present
         version = tag.lstrip('v')
 
-        # Validate semantic version format (MAJOR.MINOR.PATCH)
-        if re.match(r'^\d+\.\d+\.\d+$', version):
+        # Validate semantic version format (MAJOR.MINOR.PATCH, optional -rc.N)
+        if re.match(r'^\d+\.\d+\.\d+(-rc\.\d+)?$', version):
             return version
         else:
             print(f"Warning: Git tag '{tag}' is not valid semver, using 0.0.0-dev")

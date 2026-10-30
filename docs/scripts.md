@@ -25,7 +25,8 @@ Embedded BLE devices require consistent device identification and versioning acr
 ### What It Does
 
 1. **Git-based versioning:**
-   - Extracts semantic version from the latest Git tag (v1.2.3 format)
+   - Extracts semantic version from the latest Git tag (v1.2.3 format, or v1.2.3-rc.4 for a
+     release candidate)
    - Generates short commit hash with dirty-tree detection
    - Fallback to `0.0.0-dev` if no tags exist
 
