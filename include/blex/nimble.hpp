@@ -553,8 +553,29 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
             return NimBLEGattStatus::Success;
         }
 
+        // After a write the stored bytes are the write, not a value the handler set: reads run
+        // ReadHandler until the next setValue marks the value valid again.
+        static void invalidate_read_notify_value() {
+            if constexpr (use_read_notify_optimization && Base::ReadHandler != nullptr) {
+                read_notify_optimization.notified_value_valid.store(false, std::memory_order_release);
+            }
+        }
+
+        // A WriteHandler returning uint8_t answers the write with that ATT status; a void one
+        // answers Success.
+        template<typename... WriteArgs>
+        static uint8_t call_write_handler(WriteArgs&&... args) {
+            if constexpr (std::is_same_v<std::invoke_result_t<decltype(Base::WriteHandler), WriteArgs...>, uint8_t>) {
+                return Base::WriteHandler(std::forward<WriteArgs>(args)...);
+            } else {
+                Base::WriteHandler(std::forward<WriteArgs>(args)...);
+                return NimBLEGattStatus::Success;
+            }
+        }
+
         // NimBLE stores `value` only after Success; pChar still holds the previous write.
         uint8_t onWrite(NimBLECharacteristic* pChar, NimBLEAttValue& value, NimBLEConnInfo& connInfo) override {
+            uint8_t status = NimBLEGattStatus::Success;
             if constexpr (Base::WriteHandler != nullptr) {
                 // Detect if WriteHandler accepts ConnectionInfo parameter
                 constexpr bool wants_conn_info_value =
@@ -567,34 +588,36 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                 if constexpr (std::is_same_v<typename Base::value_type, std::string> ||
                               std::is_same_v<typename Base::value_type, std::vector<uint8_t>>) {
                     if constexpr (wants_conn_info_value) {
-                        Base::WriteHandler(value, connInfo);
+                        status = call_write_handler(value, connInfo);
                     } else {
-                        Base::WriteHandler(value);
+                        status = call_write_handler(value);
                     }
                 } else if constexpr (std::is_array_v<typename Base::value_type> &&
                                      std::is_same_v<std::remove_extent_t<typename Base::value_type>, uint8_t>) {
                     // uint8_t[N] buffer type: pass raw (ptr, size) with optional connInfo
                     if constexpr (wants_conn_info_buffer) {
-                        Base::WriteHandler(value.data(), value.size(), connInfo);
+                        status = call_write_handler(value.data(), value.size(), connInfo);
                     } else {
-                        Base::WriteHandler(value.data(), value.size());
+                        status = call_write_handler(value.data(), value.size());
                     }
                 } else {
                     if (value.size() < sizeof(typename Base::value_type)) {
                         BLEX_LOG_ERROR("BLE write ignored due to size mismatch: got %u, expected %u\n",
                                       (unsigned)value.size(), (unsigned)sizeof(typename Base::value_type));
+                        invalidate_read_notify_value();
                         return NimBLEGattStatus::Success;  // Silently ignore malformed writes
                     }
                     typename Base::value_type val;
                     std::memcpy(&val, value.data(), sizeof(typename Base::value_type));
                     if constexpr (wants_conn_info_value) {
-                        Base::WriteHandler(val, connInfo);
+                        status = call_write_handler(val, connInfo);
                     } else {
-                        Base::WriteHandler(val);
+                        status = call_write_handler(val);
                     }
                 }
             }
-            return NimBLEGattStatus::Success;
+            invalidate_read_notify_value();
+            return status;
         }
 
         // Override onStatus: NimBLE base requires NimBLEConnInfo& param (unused in handler)
