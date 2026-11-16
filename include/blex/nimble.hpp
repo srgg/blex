@@ -563,12 +563,12 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
 
         // A WriteHandler returning uint8_t answers the write with that ATT status; a void one
         // answers Success.
-        template<typename... Args>
-        static uint8_t call_write_handler(Args&&... args) {
-            if constexpr (std::is_same_v<std::invoke_result_t<decltype(Base::WriteHandler), Args...>, uint8_t>) {
-                return Base::WriteHandler(std::forward<Args>(args)...);
+        template<typename... WriteArgs>
+        static uint8_t call_write_handler(WriteArgs&&... args) {
+            if constexpr (std::is_same_v<std::invoke_result_t<decltype(Base::WriteHandler), WriteArgs...>, uint8_t>) {
+                return Base::WriteHandler(std::forward<WriteArgs>(args)...);
             } else {
-                Base::WriteHandler(std::forward<Args>(args)...);
+                Base::WriteHandler(std::forward<WriteArgs>(args)...);
                 return NimBLEGattStatus::Success;
             }
         }
