@@ -564,7 +564,7 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
         // A WriteHandler returning uint8_t answers the write with that ATT status; a void one
         // answers Success.
         template<typename... Args>
-        static uint8_t write_status(Args&&... args) {
+        static uint8_t call_write_handler(Args&&... args) {
             if constexpr (std::is_same_v<std::invoke_result_t<decltype(Base::WriteHandler), Args...>, uint8_t>) {
                 return Base::WriteHandler(std::forward<Args>(args)...);
             } else {
@@ -588,17 +588,17 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                 if constexpr (std::is_same_v<typename Base::value_type, std::string> ||
                               std::is_same_v<typename Base::value_type, std::vector<uint8_t>>) {
                     if constexpr (wants_conn_info_value) {
-                        status = write_status(value, connInfo);
+                        status = call_write_handler(value, connInfo);
                     } else {
-                        status = write_status(value);
+                        status = call_write_handler(value);
                     }
                 } else if constexpr (std::is_array_v<typename Base::value_type> &&
                                      std::is_same_v<std::remove_extent_t<typename Base::value_type>, uint8_t>) {
                     // uint8_t[N] buffer type: pass raw (ptr, size) with optional connInfo
                     if constexpr (wants_conn_info_buffer) {
-                        status = write_status(value.data(), value.size(), connInfo);
+                        status = call_write_handler(value.data(), value.size(), connInfo);
                     } else {
-                        status = write_status(value.data(), value.size());
+                        status = call_write_handler(value.data(), value.size());
                     }
                 } else {
                     if (value.size() < sizeof(typename Base::value_type)) {
@@ -610,9 +610,9 @@ struct CharacteristicBackend<CharacteristicBase<T, UUID, Perms, Derived, Args...
                     typename Base::value_type val;
                     std::memcpy(&val, value.data(), sizeof(typename Base::value_type));
                     if constexpr (wants_conn_info_value) {
-                        status = write_status(val, connInfo);
+                        status = call_write_handler(val, connInfo);
                     } else {
-                        status = write_status(val);
+                        status = call_write_handler(val);
                     }
                 }
             }
